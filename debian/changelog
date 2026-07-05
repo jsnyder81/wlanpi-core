@@ -1,3 +1,11 @@
+wlanpi-core (2.1.11-1~pr131) unstable; urgency=medium
+
+  * Merge PR #131: P0 REST endpoints (network primitives, WLAN scan,
+    speedtest, system, hotspot, WiFi), OpenAPI improvements, and
+    expanded test suite (test build)
+
+ -- Jake Snyder <jsnyder81@gmail.com>  Sat, 04 Jul 2026 16:25:22 +0000
+
 wlanpi-core (2.1.10-2) unstable; urgency=medium
 
   * Hardening namespaces functionality for robustness and reliability
