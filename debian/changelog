@@ -1,3 +1,15 @@
+wlanpi-core (2.1.11-1~pr131mcpjwt1) unstable; urgency=medium
+
+  * nginx: route JWT-bearing on-box clients to the JWT auth path. Requests
+    tagged 'X-Wlanpi-Client: mcp' get a non-loopback sentinel X-Real-IP
+    (192.0.2.1, RFC 5737) so verify_auth_wrapper validates their Bearer
+    token instead of forcing the localhost HMAC path (which needs the
+    root-owned shared secret an unprivileged on-box service cannot read).
+    Opt-in and safe: the JWT is still required and validated, so it can
+    never bypass auth. Untagged traffic keeps $remote_addr / HMAC behavior.
+
+ -- Jake Snyder <jsnyder81@gmail.com>  Thu, 09 Jul 2026 04:00:00 +0000
+
 wlanpi-core (2.1.11-1~pr131) unstable; urgency=medium
 
   * Merge PR #131: P0 REST endpoints (network primitives, WLAN scan,
