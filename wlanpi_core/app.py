@@ -9,6 +9,7 @@ from pathlib import Path
 
 # third party imports
 from fastapi import FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -236,49 +237,75 @@ class InitializationManager:
             parent_dir = secrets_dir.parent
 
             if not parent_dir.exists():
-                self.log.warning(
-                    f"Parent directory {parent_dir} does not exist yet - system may not be fully booted"
-                )
+                self.log.info(f"Creating parent directory {parent_dir}")
                 try:
-                    parent_dir.mkdir(parents=True, exist_ok=True)
-                    self.log.debug(f"Created parent directory {parent_dir}")
+                    parent_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
+                    self.log.debug(f"Successfully created parent directory {parent_dir}")
+                except PermissionError as e:
+                    self.log.error(
+                        f"FATAL: Permission denied creating {parent_dir}. "
+                        f"Ensure the process is running with appropriate privileges. Error: {e}"
+                    )
+                    return False
                 except Exception as e:
-                    self.log.error(f"Could not create parent directory: {e}")
+                    self.log.error(
+                        f"FATAL: Failed to create parent directory {parent_dir}: {e}"
+                    )
                     return False
 
-            test_file = parent_dir / f"wlanpi_boot_test_{int(time.time())}"
+            test_file = parent_dir / f".wlanpi_boot_test_{int(time.time())}"
             try:
                 test_file.write_text("test")
                 test_file.unlink()
                 self.log.debug(f"Filesystem check successful on {parent_dir}")
             except Exception as e:
-                self.log.error(f"Filesystem not writable: {e}")
+                self.log.error(
+                    f"FATAL: Filesystem not writable at {parent_dir}: {e}. "
+                    f"Check disk space, permissions, and filesystem health."
+                )
                 return False
 
             config_dir = Path(CONFIG_DIR)
             parent_dir = config_dir.parent
 
             if not parent_dir.exists():
-                self.log.warning(
-                    f"Parent directory {parent_dir} does not exist yet - system may not be fully booted"
-                )
+                self.log.info(f"Creating parent directory {parent_dir}")
                 try:
-                    parent_dir.mkdir(parents=True, exist_ok=True)
-                    self.log.debug(f"Created parent directory {parent_dir}")
-                except Exception as e:
-                    self.log.error(f"Could not create parent directory: {e}")
+                    parent_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
+                    self.log.debug(f"Successfully created parent directory {parent_dir}")
+                except PermissionError as e:
+                    self.log.error(
+                        f"FATAL: Permission denied creating {parent_dir}. "
+                        f"Ensure the process is running with appropriate privileges. Error: {e}"
+                    )
                     return False
-            config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            current_config_file = Path(CURRENT_CONFIG_FILE)
-            current_config_file.touch(mode=0o700, exist_ok=True)
-            
-            # Ensure default config exists (get_config will create it if missing)
+                except Exception as e:
+                    self.log.error(
+                        f"FATAL: Failed to create parent directory {parent_dir}: {e}"
+                    )
+                    return False
+
+            try:
+                config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+                current_config_file = Path(CURRENT_CONFIG_FILE)
+                current_config_file.touch(mode=0o700, exist_ok=True)
+            except PermissionError as e:
+                self.log.error(
+                    f"FATAL: Permission denied creating network config store at {config_dir}: {e}"
+                )
+                return False
+            except Exception as e:
+                self.log.error(f"FATAL: Failed to create network config store: {e}")
+                return False
+
             self.log.info("Checking if default config exists")
             try:
                 get_config("default")
                 self.log.info("Default config ok")
             except Exception as e:
-                self.log.error(f"Failed to ensure default namespaces configuration exists: {e}")
+                self.log.error(
+                    f"Failed to ensure default namespaces configuration exists: {e}"
+                )
                 return False
 
             return True
@@ -504,6 +531,59 @@ def create_app(debug: bool = False):
         openapi_tags=settings.TAGS_METADATA,
         debug=debug,
     )
+
+    def custom_openapi():
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+            tags=app.openapi_tags,
+        )
+        schema["externalDocs"] = {
+            "description": "API Integration Guide (workflows & worked examples)",
+            "url": "https://github.com/bentumbler/wlanpi-core/blob/dev/docs/API-INTEGRATION-GUIDE.md",
+        }
+        components = schema.setdefault("components", {})
+        security_schemes = components.setdefault("securitySchemes", {})
+        security_schemes["HmacSignature"] = {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-Request-Signature",
+            "description": (
+                "HMAC-SHA256 hex digest of canonical request "
+                "(method, path, query, body). Localhost callers only."
+            ),
+        }
+        token_path = f"{settings.API_V1_STR}/auth/token"
+        token_post = schema.get("paths", {}).get(token_path, {}).get("post")
+        if token_post is not None:
+            token_post["security"] = [{"HmacSignature": []}, {}]
+        ws_path = f"{settings.API_V1_STR}/streaming/capture"
+        schema.setdefault("paths", {})[ws_path] = {
+            "get": {
+                "tags": ["streaming"],
+                "summary": "Packet capture WebSocket",
+                "description": (
+                    "Upgrade to WebSocket for live WiFi capture. Send JSON text "
+                    "commands (`get_supported_frequencies`, `configure`, `start`, "
+                    "`stop`); receive JSON events and binary pcapng frames. "
+                    "Auth not enforced today — treat as privileged."
+                ),
+                "operationId": "streaming_capture_websocket",
+                "responses": {
+                    "101": {
+                        "description": "Switching Protocols — WebSocket capture session",
+                    }
+                },
+            }
+        }
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi
 
     @app.exception_handler(DatabaseError)
     async def database_error_handler(request: Request, exc: DatabaseError):

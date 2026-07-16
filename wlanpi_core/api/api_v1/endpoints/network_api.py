@@ -1,21 +1,32 @@
+import asyncio
+import json
 from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, Response
+from fastapi.responses import JSONResponse
+
+from wlanpi_core.adapters.discovery import list_interfaces
+from wlanpi_core.api.openapi_docs import RESPONSES_SCAN
 
 from wlanpi_core.core.auth import verify_auth_wrapper
 from wlanpi_core.core.config import settings
 from wlanpi_core.models.network.vlan.vlan_errors import VLANError
 from wlanpi_core.models.validation_error import ValidationError
 from wlanpi_core.schemas import network
+from wlanpi_core.schemas.common.errors import DeprecatedEndpointResponse
 from wlanpi_core.schemas.network.config import NetworkConfigResponse
 from wlanpi_core.schemas.network.network import IPInterface, IPInterfaceAddress
+from wlanpi_core import network as network_primitives
+from wlanpi_core.network.lookup import resolve_interface_namespace
 from wlanpi_core.services import (
     network_ethernet_service,
     network_namespace_service,
-    network_service,
 )
+from wlanpi_core.wlan.scan import NoScanAdapterError, wlan_scan
+from wlanpi_core.wpa.status import get_wpa_status
 
 router = APIRouter()
+legacy_wlan_router = APIRouter()
 
 from wlanpi_core.core.logging import get_logger
 
@@ -62,7 +73,7 @@ async def show_all_interfaces(interface: Optional[str] = None):
     response_model=dict[str, list[IPInterface]],
     dependencies=[Depends(verify_auth_wrapper)],
 )
-async def show_all_ethernet_interfaces(interface: Optional[str] = None):
+async def show_all_ethernet_interfaces(interface: str):
     """
     Returns all ethernet interfaces.
     """
@@ -234,47 +245,226 @@ async def delete_ethernet_vlan(
         return Response(content="Internal Server Error", status_code=500)
 
 
+        return Response(content="Internal Server Error", status_code=500)
+
+
 ################################
-# WLAN Management              #
+# Network primitives (P0)      #
 ################################
 
 
 @router.get(
+    "/routing",
+    response_model=network.RoutingTable,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_routing_table(namespace: Optional[str] = None):
+    """Structured routing table from ``ip -j route show`` (root by default)."""
+    try:
+        return network_primitives.get_routing_table(namespace=namespace)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to read routing table", status_code=503)
+
+
+@router.get(
+    "/connections/tcp",
+    response_model=network.ConnectionsResponse,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_tcp_connections(namespace: Optional[str] = None):
+    """Active TCP sockets from ``ss``."""
+    try:
+        return network_primitives.get_tcp_connections(namespace=namespace)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to list TCP connections", status_code=503)
+
+
+@router.get(
+    "/connections/udp",
+    response_model=network.ConnectionsResponse,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_udp_connections(namespace: Optional[str] = None):
+    """Active UDP sockets from ``ss``."""
+    try:
+        return network_primitives.get_udp_connections(namespace=namespace)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to list UDP connections", status_code=503)
+
+
+@router.get(
+    "/dhcp/leases",
+    response_model=network.DhcpLeasesResponse,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_dhcp_leases():
+    """Parse dhclient lease files under ``/var/lib/dhcp``."""
+    try:
+        return network_primitives.get_dhcp_leases()
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to read DHCP leases", status_code=503)
+
+
+@router.get(
+    "/interfaces/{iface}/link-stats",
+    response_model=network.LinkStats,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_interface_link_stats(iface: str):
+    """Per-interface link statistics via ethtool."""
+    try:
+        namespace = resolve_interface_namespace(iface)
+        return network_primitives.get_link_stats(iface, namespace=namespace)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to read link statistics", status_code=503)
+
+
+@router.post(
+    "/interfaces/{iface}/renew",
+    response_model=network.DhcpRenewResponse,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def renew_interface_dhcp(iface: str):
+    """Renew DHCP lease for an interface in its current namespace."""
+    try:
+        return network_primitives.renew_interface_dhcp(iface)
+    except ValidationError as ve:
+        return Response(content=ve.error_msg, status_code=ve.status_code)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to renew DHCP lease", status_code=503)
+
+
+@router.get(
+    "/wlan/usb-drivers",
+    response_model=network.WlanUsbDriversResponse,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_wlan_usb_drivers():
+    """
+    USB-attached WLAN adapters and bound drivers.
+
+    Returns HTTP 200 with ``adapters: []`` when radios are PCI/on-board only.
+    Check ``interfaces_scanned`` — if > 0 and ``adapters`` is empty, use
+    ``GET /network/wlan/pci-drivers`` for built-in WiFi.
+    """
+    try:
+        return network_primitives.get_usb_wlan_drivers()
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to list USB WLAN drivers", status_code=503)
+
+
+@router.get(
+    "/wlan/pci-drivers",
+    response_model=network.WlanPciDriversResponse,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_wlan_pci_drivers():
+    """
+    PCI/platform wireless devices and bound WLAN interface drivers.
+
+    ``pci_devices`` comes from lspci; ``adapters`` maps iw dev interfaces to
+    drivers. Both lists can be populated independently.
+    """
+    try:
+        return network_primitives.get_pci_wlan_drivers()
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to list PCI WLAN drivers", status_code=503)
+
+
+################################
+# WLAN Management (legacy DBus)#
+################################
+
+
+@legacy_wlan_router.get(
     "/wlan/getInterfaces",
     response_model=network.Interfaces,
     dependencies=[Depends(verify_auth_wrapper)],
+    deprecated=True,
+    summary="[Deprecated] List wireless interfaces",
 )
 async def get_a_systemd_network_interfaces(timeout: int = settings.API_DEFAULT_TIMEOUT):
     """
-    Queries systemd via dbus to get the details of the currently connected network.
-    """
+    **Deprecated** — prefer `GET /api/v1/network/config/status`.
 
+    **Replacement:** `GET /api/v1/network/config/status`
+
+    **Behaviour today:** delegates to `iw dev` (no DBus).
+    """
+    del timeout
     try:
-        return await network_service.get_systemd_network_interfaces(timeout)
-    except ValidationError as ve:
-        return Response(content=ve.error_msg, status_code=ve.status_code)
+        interfaces = list_interfaces()
+        return {"interfaces": [{"interface": name} for name in interfaces]}
     except Exception as ex:
         log.error(ex)
         return Response(content="Internal Server Error", status_code=500)
 
 
-@router.get(
+@legacy_wlan_router.get(
     "/wlan/scan",
     response_model=network.ScanResults,
     response_model_exclude_none=True,
     dependencies=[Depends(verify_auth_wrapper)],
+    deprecated=True,
+    summary="[Deprecated] WLAN scan",
+    responses={**RESPONSES_SCAN},
 )
 async def get_a_systemd_network_scan(
     type: str, interface: str, timeout: int = settings.API_DEFAULT_TIMEOUT
 ):
     """
-    Queries systemd via dbus to get a scan of the available networks.
-    """
+    **Deprecated** — use `GET /api/v1/utils/wlan/scan`.
 
+    **Replacement:** `GET /api/v1/utils/wlan/scan`
+
+    Delegates to the namespace-aware scan primitive; maps to legacy `nets[]`.
+    Query `type` is ignored. Pass `interface` as the scan iface.
+    """
+    del type, timeout
     try:
-        # return await network_service.get_systemd_network_scan(type)
-        return await network_service.get_async_systemd_network_scan(
-            type, interface, timeout
+        result = await asyncio.to_thread(
+            wlan_scan,
+            iface=interface or None,
+            namespace=None,
+            hidden=True,
+            detail="short",
+        )
+        if result.get("needsSelection"):
+            return Response(
+                content=json.dumps(
+                    {
+                        "error": "NEEDS_SELECTION",
+                        "candidates": result.get("candidates", []),
+                    }
+                ),
+                status_code=409,
+                media_type="application/json",
+            )
+        nets = []
+        for entry in result.get("networks", []):
+            nets.append(
+                network.ScanItem(
+                    ssid=entry.get("ssid", ""),
+                    bssid=entry.get("bssid", ""),
+                    key_mgmt=entry.get("key_mgmt", "unknown"),
+                    signal=entry.get("signal", 0),
+                    freq=entry.get("freq", 0),
+                    minrate=entry.get("minrate", 0),
+                )
+            )
+        return network.ScanResults(nets=nets)
+    except NoScanAdapterError as exc:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "NO_SCAN_ADAPTER", "candidates": exc.candidates},
         )
     except ValidationError as ve:
         return Response(content=ve.error_msg, status_code=ve.status_code)
@@ -283,53 +473,50 @@ async def get_a_systemd_network_scan(
         return Response(content="Internal Server Error", status_code=500)
 
 
-@router.post(
+@legacy_wlan_router.post(
     "/wlan/set-dbus",
-    response_model=network.NetworkSetupStatus,
+    status_code=410,
+    response_model=DeprecatedEndpointResponse,
     dependencies=[Depends(verify_auth_wrapper)],
+    deprecated=True,
+    summary="[Deprecated] DBus network setup — removed",
 )
 async def set_a_systemd_network_dbus(
     setup: network.WlanInterfaceSetup, timeout: int = settings.API_DEFAULT_TIMEOUT
 ):
     """
-    Queries systemd via dbus to set a single network.
+    **Deprecated — returns 410 Gone.**
+
+    **Replacement:** `POST /api/v1/network/config/` then `POST /api/v1/network/config/activate/{id}`
     """
-
-    try:
-        return await network_service.set_systemd_network_addNetwork(
-            setup.interface, setup.netConfig, setup.removeAllFirst, timeout
-        )
-    except ValidationError as ve:
-        return Response(content=ve.error_msg, status_code=ve.status_code)
-    except Exception as ex:
-        log.error(ex)
-        return Response(content="Internal Server Error", status_code=500)
+    del setup, timeout
+    return DeprecatedEndpointResponse(
+        message="Use POST /api/v1/network/config/ then POST /api/v1/network/config/activate/{id}",
+        replacement="/api/v1/network/config/",
+    )
 
 
-@router.post(
+@legacy_wlan_router.post(
     "/wlan/set",
-    response_model=network.NetworkSetupStatus,
+    status_code=410,
+    response_model=DeprecatedEndpointResponse,
     dependencies=[Depends(verify_auth_wrapper)],
+    deprecated=True,
+    summary="[Deprecated] Namespace stub — removed",
 )
 async def set_a_systemd_network(
     setup: network.WlanInterfaceSetup, timeout: int = settings.API_DEFAULT_TIMEOUT
 ):
     """
-    Queries systemd via dbus to set a single network.
-    """
+    **Deprecated — returns 410 Gone.**
 
-    try:
-        namespace_service = network_namespace_service.NetworkNamespaceService()
-        namespace_service.restore_phy_to_userspace("testns")
-        status = namespace_service.activate_config(
-            setup.interface, setup.netConfig, "testns", setup.removeAllFirst
-        )
-        return status
-    except ValidationError as ve:
-        return Response(content=ve.error_msg, status_code=ve.status_code)
-    except Exception as ex:
-        log.error(ex)
-        return Response(content="Internal Server Error", status_code=500)
+    **Replacement:** same as `/wlan/set-dbus` — use `/network/config/` + activate.
+    """
+    del setup, timeout
+    return DeprecatedEndpointResponse(
+        message="Use POST /api/v1/network/config/ then POST /api/v1/network/config/activate/{id}",
+        replacement="/api/v1/network/config/",
+    )
 
 
 @router.post(
@@ -360,22 +547,52 @@ async def revert_wlan_namespace(
         return Response(content="Internal Server Error", status_code=500)
 
 
-@router.get(
+@legacy_wlan_router.get(
     "/wlan/getConnected",
     response_model=network.ConnectedNetwork,
     response_model_exclude_none=True,
     dependencies=[Depends(verify_auth_wrapper)],
+    deprecated=True,
+    summary="[Deprecated] Connected network details",
 )
 async def get_a_systemd_currentNetwork_details(
     interface: str, timeout: int = settings.API_DEFAULT_TIMEOUT
 ):
     """
-    Queries systemd via dbus to get the details of the currently connected network.
-    """
+    **Deprecated** — prefer `GET /api/v1/network/config/status` plus wpa state.
 
+    **Replacement:** `GET /api/v1/network/config/status`
+
+    **Behaviour today:** delegates to `wpa_cli status` for the given `interface`.
+    """
+    del timeout
     try:
-        return await network_service.get_systemd_network_currentNetwork_details(
-            interface, timeout
+        status = await asyncio.to_thread(get_wpa_status, interface, None)
+        wpa = status.get("wpa_status") or {}
+        connected = wpa.get("wpa_state") == "COMPLETED"
+        connected_net = None
+        scan_match = status.get("connected_scan")
+        if connected and scan_match:
+            connected_net = network.ScanItem(
+                ssid=scan_match.get("ssid", wpa.get("ssid", "")),
+                bssid=scan_match.get("bssid", wpa.get("bssid", "")),
+                key_mgmt=scan_match.get("key_mgmt", "unknown"),
+                signal=scan_match.get("signal", 0),
+                freq=scan_match.get("freq", 0),
+                minrate=scan_match.get("minrate", 0),
+            )
+        elif connected and wpa.get("ssid"):
+            connected_net = network.ScanItem(
+                ssid=wpa.get("ssid", ""),
+                bssid=wpa.get("bssid", ""),
+                key_mgmt="unknown",
+                signal=0,
+                freq=0,
+                minrate=0,
+            )
+        return network.ConnectedNetwork(
+            connectedStatus=connected,
+            connectedNet=connected_net,
         )
     except ValidationError as ve:
         return Response(content=ve.error_msg, status_code=ve.status_code)
