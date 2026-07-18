@@ -40,9 +40,11 @@ Move mode management into **wlanpi-core** as a first-class feature:
   bundles. Users author **custom modes** in the same documented format and
   **import/export them via the REST API**.
 - The underlying stack is modernized: **dnsmasq** replaces isc-dhcp-server (EOL
-  upstream since 2022), and a dedicated **nftables** table replaces the ufw
-  `before.rules` NAT edits. **ifupdown is retained** (wlanpi-core already manages
-  `/etc/network/interfaces.d/` content).
+  upstream since 2022). NAT moves from ufw `before.rules` edits into a dedicated
+  **nftables** table; forwarding permits are applied as ledgered **`ufw route
+  allow`** rules so they cooperate with ufw's default-deny FORWARD policy
+  instead of being silently overridden by it. **ifupdown is retained**
+  (wlanpi-core already manages `/etc/network/interfaces.d/` content).
 
 ### Architecture at a glance
 
@@ -65,7 +67,7 @@ flowchart TB
             A2[hostapd]
             A3[dnsmasq]
             A4[sysctl]
-            A5[nftables]
+            A5[firewall<br/>nft + ufw route]
             A6[services]
             A7[netns]
         end
@@ -81,7 +83,7 @@ flowchart TB
         S2[/etc/hostapd/wlanpi-mode.conf/]
         S3[/etc/dnsmasq.d/wlanpi-mode.conf/]
         S4[/etc/sysctl.d/90-wlanpi-mode.conf/]
-        S5[nft table inet wlanpi_mode]
+        S5[nft table inet wlanpi_mode<br/>+ ufw route rules]
         S6[systemd via D-Bus]
         S7[network namespaces]
     end
@@ -232,7 +234,11 @@ files:                         # payload installs; dest checked against allowlis
   - src: files/dnsmasq.conf
     dest: /etc/dnsmasq.d/wlanpi-mode.conf
   - src: files/nftables.nft
-    dest: /etc/nftables.d/wlanpi-mode.nft   # may only define table inet wlanpi_mode*
+    dest: /etc/nftables.d/wlanpi-mode.nft   # NAT only; table inet wlanpi_mode* only
+
+firewall:
+  forward:                     # applied as ledgered `ufw route allow` rules -
+    - { in: wlan0, out: eth0 } # forwarding must live inside ufw's framework (§3.3)
 
 services:                      # names checked against the service allowlist
   - name: hostapd
@@ -261,8 +267,14 @@ reconnect_hint:                # documented for API clients (§4.3)
 ### 2.4 Variables and generators
 
 Templating uses Jinja2 in a **SandboxedEnvironment** with only the `variables`
-map and read-only system facts (hostname, per-interface MACs) in scope - no
-filesystem access, no arbitrary Python.
+map and read-only system facts in scope - no filesystem access, no arbitrary
+Python. Facts include hostname, per-interface MACs, and **the current
+regulatory domain** (`{{ facts.reg_domain }}`, read via `wlanpi-reg-domain`).
+The reg domain fact matters: legacy modes got `country_code` written into
+their hostapd templates by `wlanpi-reg-domain` itself; those paths disappear
+with the legacy packages, so shipped bundles set
+`country_code={{ facts.reg_domain }}` to keep DFS/5 GHz behavior correct
+after migration.
 
 "Generate on first activation" is expressed with `generate:` + `persist: true`.
 Generators are **engine built-ins only** - `mac_suffix`, `random_passphrase`,
@@ -316,8 +328,12 @@ and strictly validated (enforced in `wlanpi_core/modes/bundle.py`, exercised by
    signed/trusted-bundle tier could revisit this; explicitly out of scope now.)
 2. **Install-path allowlist** for `files[].dest` (prefix match, symlink-resolved,
    no `..`): `/etc/hostapd/`, `/etc/dnsmasq.d/`, `/etc/network/interfaces.d/`,
-   `/etc/sysctl.d/`, `/etc/nftables.d/`, `/etc/ser2net.conf`. The engine - never
-   the bundle - writes `/etc/wlanpi-state` and the interfaces include.
+   `/etc/sysctl.d/`, `/etc/nftables.d/`, `/etc/ser2net/`. All are engine-owned
+   drop-in locations; no stock file is ever an install target (ser2net is
+   configured via an engine-owned `/etc/ser2net/wlanpi-mode.yaml` plus a unit
+   override - trixie's ser2net reads `/etc/ser2net.yaml`, a stock file the
+   engine must not touch). The engine - never the bundle - writes
+   `/etc/wlanpi-state` and the interfaces include.
 3. **Service allowlist**, extending the existing `allowed_services` mechanism in
    `services/system_service.py`: `hostapd`, `dnsmasq`, `ser2net`,
    `wpa_supplicant@*`, `lldpd`, iperf/tftpd, `wlanpi-*`. Unknown units are
@@ -353,6 +369,7 @@ backups directory):
 | Service enabled/started/stopped | Its prior enabled + active state (e.g. *was* `wpa_supplicant@wlan0` enabled on this box - not "classic says enable it") |
 | sysctl drop-in | Implicit: removing the drop-in + `sysctl --system` restores base |
 | nft table | Implicit: `nft delete table inet wlanpi_mode` |
+| ufw route rule | Implicit: rule absent before claim; `ufw route delete ...` restores |
 
 Consequences:
 
@@ -393,16 +410,28 @@ Unlike the legacy switchers, the engine never edits shared stock files
 (`/etc/sysctl.conf`, `/etc/network/interfaces`, ufw rules). It owns dedicated
 drop-ins:
 
-| Surface | Engine-owned path | Applied via |
+| Surface | Engine-owned path / resource | Applied via |
 |---|---|---|
 | Interfaces | `/etc/network/interfaces.d/wlanpi-mode` | `ifup`/`ifdown` (coexists with the existing `interfaces.d/vlans` writer) |
 | hostapd | `/etc/hostapd/wlanpi-mode.conf` | systemd unit override (the user's `/etc/hostapd/hostapd.conf` is never replaced) |
 | dnsmasq | `/etc/dnsmasq.d/wlanpi-mode.conf` | service restart |
+| ser2net | `/etc/ser2net/wlanpi-mode.yaml` | systemd unit override (stock `/etc/ser2net.yaml` is never touched) |
 | sysctl | `/etc/sysctl.d/90-wlanpi-mode.conf` | `sysctl --system` |
-| Firewall/NAT | `/etc/nftables.d/wlanpi-mode.nft` (include added to `/etc/nftables.conf` once by postinst) | `nft -f`; revert = `nft delete table inet wlanpi_mode` |
+| NAT | `/etc/nftables.d/wlanpi-mode.nft` (NAT only) | `nft -f` on apply; **re-asserted at every wlanpi-core startup** while a mode is active (§3.5); revert = `nft delete table inet wlanpi_mode` |
+| Forwarding | Ledgered `ufw route allow` rules from the manifest `firewall.forward` list | `ufw route allow in on X out on Y` on apply; `ufw route delete ...` on release |
 
-Releasing claims = delete engine drop-ins, delete the nft table, `sysctl
---system`, restore ledgered originals.
+**Why forwarding goes through ufw, not the nft table.** ufw's default FORWARD
+policy is deny. In nf_tables, every hooked chain is traversed and any drop
+verdict wins, so accept rules in a separate `wlanpi_mode` table cannot
+override ufw's deny - forwarded traffic would still be dropped. The legacy
+switchers solved this by editing `/etc/ufw/before.rules`; the engine solves
+it inside ufw's own framework with `ufw route allow` rules, which are
+additive, exactly reversible, and ledgerable (pre-claim state: rule absent).
+The engine never edits ufw's config files. NAT is unaffected by ufw's filter
+chains and stays in the engine's nft table.
+
+Releasing claims = delete engine drop-ins, delete the nft table, remove the
+ufw route rules, `sysctl --system`, restore ledgered originals.
 
 ### 3.4 Pipeline and apply order
 
@@ -431,7 +460,8 @@ Apply order for an A→B diff:
  5. Restore released claims from ledger; install B's files atomically
     (write .tmp in same dir, fsync, rename; ledger newly claimed originals)
  6. sysctl --system
- 7. nft: delete old wlanpi_mode table, nft -f staged ruleset
+ 7. Firewall: delete old wlanpi_mode table, nft -f staged NAT ruleset;
+    sync ufw route rules (delete A-only, add B-only)
  8. ifup B's interfaces (hard timeouts; reuse utils/network_management.py patterns)
  9. Create namespaces, move interfaces, start namespace services (if declared)
 10. Enable + start B's services (hostapd before dnsmasq)
@@ -454,6 +484,17 @@ steps[], error}`. On wlanpi-core startup:
 - Ephemeral marker present (`persist: false` mode committed before this boot) →
   release the mode's claims at boot, matching legacy server-mode single-boot
   semantics.
+- A mode is active (journal `committed`, persistent) → **re-assert its runtime
+  state**: `nft -f` the active mode's staged NAT ruleset. This is required for
+  boot persistence: `/etc/nftables.conf` is only read by `nftables.service`,
+  which is not enabled on ufw-managed boxes - without re-assertion, a reboot
+  in hotspot mode would silently come up with no NAT table. Enabling
+  `nftables.service` instead was considered and rejected: it introduces
+  ordering questions against ufw for no benefit, since wlanpi-core already
+  runs at boot as root and owns the mode state. (Everything else persists on
+  its own: drop-in files, service enablement, sysctl.d, ifupdown config, and
+  the ufw route rules, which ufw stores in `user.rules` and re-applies at
+  boot. Only the nft table is runtime state.)
 
 ### 3.6 Checkpoints: point-in-time restore (P4)
 
@@ -574,11 +615,13 @@ auto-activation (existing behavior) remains allowed only here.
 ### hotspot
 - eth0: DHCP client (upstream); wlan0: static `172.16.43.1/24`
 - hostapd on wlan0 - SSID/passphrase from persisted `mac_suffix` /
-  `random_passphrase` generators (preserves legacy personalization)
+  `random_passphrase` generators (preserves legacy personalization);
+  `country_code={{ facts.reg_domain }}`
 - dnsmasq: `dhcp-range=172.16.43.50,172.16.43.150`, bound to wlan0
   (`bind-interfaces` / `except-interface=eth0`)
 - sysctl `net.ipv4.ip_forward=1`; nft `table inet wlanpi_mode` with postrouting
-  masquerade out eth0 + forward-accept rules
+  masquerade out eth0 (NAT only); `firewall.forward: [{in: wlan0, out: eth0}]`
+  applied as a ledgered `ufw route allow` rule
 - `stop_services: [wpa_supplicant@wlan0]`
 
 ### server
@@ -607,12 +650,15 @@ re-specified with modern tooling:
 ## 6. Migration and compatibility
 
 - **Packaging** (`debian/control`): add `Depends: hostapd, dnsmasq,
-  bridge-utils, python3-yaml`; add `Conflicts:`/`Replaces:` on `wlanpi-hotspot,
+  bridge-utils`; add `Conflicts:`/`Replaces:` on `wlanpi-hotspot,
   wlanpi-server, wlanpi-wconsole, wlanpi-bridge` so the legacy switcher packages
   are removed on upgrade and cannot fight the engine over `/etc`.
-  isc-dhcp-server drops out with them. ufw stays installed (other features use
-  it) but the engine never touches ufw config; NAT lives solely in the
-  `wlanpi_mode` nft table.
+  isc-dhcp-server drops out with them. PyYAML is a Python dependency and goes
+  in `requirements.in`/`requirements.txt` for the dh-virtualenv build, not in
+  deb `Depends` (wlanpi-core ships its own venv under `/opt/wlanpi-core`).
+  ufw stays installed; the engine never edits ufw config files - its only ufw
+  interaction is ledgered `route allow` rules via the ufw CLI (§3.3). NAT
+  lives solely in the `wlanpi_mode` nft table.
 - **Upgrade shim**: postinst / first start checks `/etc/wlanpi-state`; if the box
   is in a *legacy-applied* non-classic mode, restore the legacy `.suffix`
   backups the switchers left beside each swapped file (deterministic, documented
@@ -620,10 +666,16 @@ re-specified with modern tooling:
   Best effort: if backups are missing, leave files in place and report - the
   engine never fabricates a "stock" config. This is the only legacy-aware code;
   the engine itself needs no legacy knowledge.
-- **FPMS**: unchanged on day one - it reads `/etc/wlanpi-state`, which the engine
-  keeps writing. Follow-up (separate repo): FPMS switches modes via
-  `POST /mode/switch` over localhost HMAC and polls transition status for its
-  progress screen, deleting its own switcher-invocation code.
+- **FPMS is a day-one break, not a follow-up.** Its mode *display* keeps
+  working (it reads `/etc/wlanpi-state`, which the engine keeps writing), but
+  its mode *menu* invokes the legacy switcher scripts, which the
+  `Conflicts`/`Replaces` removes - the menu dies the moment P1 ships.
+  Therefore FPMS API-based switching (call `POST /mode/switch` over localhost
+  HMAC, poll transition status for the progress screen, delete the
+  switcher-invocation code) ships **with P1**, coordinated in the wlanpi-fpms
+  repo; "mode switch initiated from the front panel" is a P1 exit criterion.
+  If the FPMS release cannot land simultaneously, the interim FPMS build must
+  hide the mode menu rather than present dead entries.
 - **CLI deprecation**: `wlanpi-mode.sh` becomes a thin wrapper calling the
   localhost API with a deprecation warning; removed after one release cycle.
   The dead `*_SWITCHER_FILE` constants in `wlanpi_core/constants.py` are
@@ -635,8 +687,8 @@ re-specified with modern tooling:
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **P1 - Engine + built-ins + switch API** | `wlanpi_core/modes/` package (bundle loader, ledger, journal, engine, appliers for interfaces/hostapd/dnsmasq/sysctl/nftables/services/files), systemd enable/disable D-Bus additions, `mode_service.py`, `mode_api.py` (`GET /mode`, `/mode/list`, `POST /mode/switch`, `GET /mode/transition`), variables/generators (hotspot needs them), four built-in bundles, boot-time journal recovery + ephemeral release, packaging changes + legacy-restore shim | Live round-trips classic↔hotspot↔server↔bridge; rollback on induced failure; reboot persistence and `persist:false` semantics verified |
-| **P2 - Custom bundles + import/export** | Tarball pack/unpack, full §2.7 validation policy, bundle CRUD/export/import/validate endpoints, bundle-format authoring documentation (the "well-documented format" deliverable), FPMS integration follow-up | A user-authored bundle exported, edited, re-imported, and activated via API only |
+| **P1 - Engine + built-ins + switch API** | `wlanpi_core/modes/` package (bundle loader, ledger, journal, engine, appliers for interfaces/hostapd/dnsmasq/sysctl/firewall (nft + ufw route)/services/netns/files), systemd enable/disable D-Bus additions, reg-domain fact, `mode_service.py`, `mode_api.py` (`GET /mode`, `/mode/list`, `POST /mode/switch`, `GET /mode/transition`), variables/generators (hotspot needs them), four built-in bundles, boot-time journal recovery + ephemeral release + nft re-assertion, packaging changes + legacy-restore shim, **FPMS API-switching integration (wlanpi-fpms repo, ships together)** | Live round-trips classic↔hotspot↔server↔bridge with ufw enabled (NAT + forwarding verified); rollback on induced failure; reboot persistence (incl. NAT table after reboot) and `persist:false` semantics verified; **mode switch initiated from the FPMS front panel end-to-end** |
+| **P2 - Custom bundles + import/export** | Tarball pack/unpack, full §2.7 validation policy, bundle CRUD/export/import/validate endpoints, bundle-format authoring documentation (the "well-documented format" deliverable) | A user-authored bundle exported, edited, re-imported, and activated via API only |
 | **P3 - Namespace primitives** | `namespaces:` manifest section, netns applier bridging to `network_namespace_service` (incl. services-in-namespace), interaction rules with netcfg auto-activation, example namespaced custom bundle + docs | Example bundle activates with an isolated interface + service; clean release on mode exit |
 | **P4 - Checkpoints** (§3.6) | Snapshot/restore of the managed config surface reusing the ledger + transition machinery; checkpoint CRUD/restore API; auto-checkpoint before every mode switch; retention/pruning policy | Create checkpoint → switch modes → change config → restore checkpoint returns the box to the captured state (mode included); auto-checkpoints prunable and restorable |
 
@@ -655,9 +707,13 @@ re-specified with modern tooling:
    `hotspot_service._resolve_hostapd_conf()` must learn the engine's conf path
    (small P1 change); `wpa_supplicant@wlan0` must be stopped before hostapd
    claims wlan0 and is restored from the ledger on exit.
-4. **nftables/ufw coexistence** - engine rules live in a dedicated table, but
-   hook-priority interactions with ufw's chains need explicit testing (NAT and
-   forwarding must work with ufw enabled).
+4. **nftables/ufw coexistence** - designed in, not deferred: NAT lives in the
+   dedicated `wlanpi_mode` table (unaffected by ufw's filter chains);
+   forwarding goes through ledgered `ufw route allow` rules because separate-
+   table accepts cannot override ufw's default-deny FORWARD (§3.3); the nft
+   table is re-asserted at startup because nothing else loads it on ufw boxes
+   (§3.5). Residual risk is verification: P1 exit criteria include full NAT +
+   forwarding round-trips with ufw enabled.
 5. **Power loss / journal edge cases** - atomic journal writes + idempotent
    steps + rollback-on-boot; worst case is boot-to-base-config (classic), never
    a bricked network.
@@ -666,6 +722,11 @@ re-specified with modern tooling:
    and checked by `dnsmasq --test`.
 7. **Legacy-restore shim is best-effort** - missing `.suffix` backups are
    reported, not guessed at.
+8. **Upgrades on older test images** - the new `Conflicts`/`Replaces` will
+   force removal of legacy mode packages mid-upgrade on boxes running older
+   test images, with potentially odd apt resolution until the Pi is reflashed.
+   A fresh image is the supported path; the upgrade shim is best-effort and
+   release notes must say so.
 
 ---
 
@@ -682,7 +743,7 @@ wlanpi_core/modes/                      # engine internals (new package)
         hostapd.py
         dnsmasq.py
         sysctl.py
-        nftables.py
+        firewall.py    # nft table (NAT) + ledgered ufw route rules (forwarding)
         services.py    # systemd enable/disable/start/stop via system_service
         netns.py       # wraps network_namespace_service
         files.py       # generic install/remove with ledger backup
@@ -724,8 +785,10 @@ channel=6
 ieee80211n=1
 ieee80211d=1
 wmm_enabled=1
-# country_code intentionally omitted - regulatory domain is managed
-# device-wide by wlanpi-reg-domain, not per mode
+# facts.reg_domain is a read-only engine fact sourced from wlanpi-reg-domain,
+# so the device-wide regulatory domain follows the mode without the legacy
+# pattern of wlanpi-reg-domain editing per-mode template files
+country_code={{ facts.reg_domain }}
 ```
 
 A user customizing this bundle (export → edit → import) can add any hostapd
@@ -751,17 +814,15 @@ dhcp-option=option:dns-server,172.16.43.1
 
 ```
 # WLAN Pi hotspot mode - installed to /etc/nftables.d/wlanpi-mode.nft
+# NAT ONLY. Forwarding permits are declared in the manifest (firewall.forward)
+# and applied as ufw route rules - accepts in this table cannot override ufw's
+# default-deny FORWARD policy, so they must not be attempted here (see §3.3).
 # Import validation enforces that ONLY table inet wlanpi_mode* is defined,
 # so releasing the mode is always: nft delete table inet wlanpi_mode
 table inet wlanpi_mode {
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
         oifname "eth0" masquerade
-    }
-    chain forward {
-        type filter hook forward priority filter; policy accept;
-        iifname "wlan0" oifname "eth0" accept
-        iifname "eth0" oifname "wlan0" ct state established,related accept
     }
 }
 ```
@@ -776,7 +837,8 @@ values (e.g. `ssid: WLANPi_9a2f3c`); later activations reuse them. Render
 `hostapd.conf` in the Jinja2 sandbox; validate payloads (`nft -c -f`,
 `dnsmasq --test`); compute claims: interfaces `wlan0`, `eth0`; services
 `hostapd`, `dnsmasq` (enable+start), `wpa_supplicant@wlan0` (stop); three
-files; one sysctl key; the nft table.
+files; one sysctl key; the nft NAT table; one ufw route rule
+(`in on wlan0 out on eth0`).
 
 **Ledger** (written as claims are taken): `wlan0` had no static stanza →
 "absent"; `eth0` was DHCP → recorded; `wpa_supplicant@wlan0` was
@@ -785,22 +847,25 @@ recorded; each installed file → "did not exist".
 
 **Apply**: 202 returned first → stop `wpa_supplicant@wlan0` → `ifdown` wlan0 →
 install the three files + `interfaces.d/wlanpi-mode` + sysctl drop-in →
-`sysctl --system` → `nft -f` → `ifup wlan0` (eth0 already DHCP, untouched in
-practice - a claim over an identical config is a no-op) → enable+start
-hostapd, then dnsmasq → **verify**: both services active, wlan0 has
-172.16.43.1 → write `hotspot` to `/etc/wlanpi-state`, commit journal.
+`sysctl --system` → `nft -f` (NAT table) + `ufw route allow in on wlan0 out
+on eth0` → `ifup wlan0` (eth0 already DHCP, untouched in practice - a claim
+over an identical config is a no-op) → enable+start hostapd, then dnsmasq →
+**verify**: both services active, wlan0 has 172.16.43.1 → write `hotspot` to
+`/etc/wlanpi-state`, commit journal.
 
 **Switch back to classic**: every claim is released to its *ledgered* state -
 `wpa_supplicant@wlan0` re-enabled and started *because it was before*, not
 because a template says so; drop-ins deleted; `nft delete table inet
-wlanpi_mode`; wlan0 restored to its pre-mode config. If the user had, say, a
-static eth0 config set via the API before entering hotspot mode, that is
-exactly what comes back.
+wlanpi_mode`; `ufw route delete allow in on wlan0 out on eth0`; wlan0
+restored to its pre-mode config. If the user had, say, a static eth0 config
+set via the API before entering hotspot mode, that is exactly what comes
+back.
 
 **Direct hotspot → server**: diff, not teardown - `hostapd` and `dnsmasq` stay
 up (restarted once with server's configs), `wlan0` keeps 172.16.43.1/24
 (identical claim, no-op), `eth0` is reconfigured DHCP → static 172.16.42.1/24,
-the nft table is replaced, `ser2net` starts. The eth0 ledger entry still
+the nft table is replaced and the ufw route rules are synced to server's
+`firewall.forward` list, `ser2net` starts. The eth0 ledger entry still
 records its original pre-hotspot state, so a later switch to classic restores
 the true base config.
 
