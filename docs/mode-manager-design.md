@@ -239,6 +239,9 @@ files:                         # payload installs; dest checked against allowlis
 firewall:
   forward:                     # applied as ledgered `ufw route allow` rules -
     - { in: wlan0, out: eth0 } # forwarding must live inside ufw's framework (§3.3)
+  # allow: [WLANPi-Server-Serial]  # inbound openings, referencing a ufw app
+  #                                # profile shipped in files/ (server mode
+  #                                # uses this for ser2net ports; §3.3)
 
 services:                      # names checked against the service allowlist
   - name: hostapd
@@ -328,7 +331,10 @@ and strictly validated (enforced in `wlanpi_core/modes/bundle.py`, exercised by
    signed/trusted-bundle tier could revisit this; explicitly out of scope now.)
 2. **Install-path allowlist** for `files[].dest` (prefix match, symlink-resolved,
    no `..`): `/etc/hostapd/`, `/etc/dnsmasq.d/`, `/etc/network/interfaces.d/`,
-   `/etc/sysctl.d/`, `/etc/nftables.d/`, `/etc/ser2net/`. All are engine-owned
+   `/etc/sysctl.d/`, `/etc/nftables.d/`, `/etc/ser2net/`,
+   `/etc/ufw/applications.d/` (ufw app profiles only - port/protocol
+   definitions, validated with `ufw app info`; they activate nothing by
+   themselves). All are engine-owned
    drop-in locations; no stock file is ever an install target (ser2net is
    configured via an engine-owned `/etc/ser2net/wlanpi-mode.yaml` plus a unit
    override - trixie's ser2net reads `/etc/ser2net.yaml`, a stock file the
@@ -369,7 +375,7 @@ backups directory):
 | Service enabled/started/stopped | Its prior enabled + active state (e.g. *was* `wpa_supplicant@wlan0` enabled on this box - not "classic says enable it") |
 | sysctl drop-in | Implicit: removing the drop-in + `sysctl --system` restores base |
 | nft table | Implicit: `nft delete table inet wlanpi_mode` |
-| ufw route rule | Implicit: rule absent before claim; `ufw route delete ...` restores |
+| ufw rule (route / app-profile allow) | Implicit: rule absent before claim; `ufw route delete ...` / `ufw delete allow <profile>` restores |
 
 Consequences:
 
@@ -419,6 +425,7 @@ drop-ins:
 | sysctl | `/etc/sysctl.d/90-wlanpi-mode.conf` | `sysctl --system` |
 | NAT | `/etc/nftables.d/wlanpi-mode.nft` (NAT only) | `nft -f` on apply; **re-asserted at every wlanpi-core startup** while a mode is active (§3.5); revert = `nft delete table inet wlanpi_mode` |
 | Forwarding | Ledgered `ufw route allow` rules from the manifest `firewall.forward` list | `ufw route allow in on X out on Y` on apply; `ufw route delete ...` on release |
+| Inbound ports | ufw app profile in `/etc/ufw/applications.d/` (bundle file) + ledgered `ufw allow <profile>` rules from `firewall.allow` | one `ufw allow <profile>` per entry on apply; `ufw delete allow <profile>` + remove the profile file on release |
 
 **Why forwarding goes through ufw, not the nft table.** ufw's default FORWARD
 policy is deny. In nf_tables, every hooked chain is traversed and any drop
@@ -430,8 +437,22 @@ additive, exactly reversible, and ledgerable (pre-claim state: rule absent).
 The engine never edits ufw's config files. NAT is unaffected by ufw's filter
 chains and stays in the engine's nft table.
 
+**Inbound port openings use ufw application profiles.** Legacy server and
+wconsole modes opened long serial-console port ranges with a pile of
+individual `ufw allow` rules, and the off-paths did not delete them
+symmetrically (a known legacy bug class). Instead, a bundle ships a profile
+file into `/etc/ufw/applications.d/` naming its port sets, and the manifest's
+`firewall.allow` list makes the engine apply **one** ledgered
+`ufw allow <profile>` rule per entry. Release is symmetric by construction:
+delete the rule, then the profile file. Profiles are only named port/protocol
+sets - they cannot express forwarding or NAT, which is why the other two
+mechanisms exist. The resulting layering: **profiles name the ports (file),
+`ufw allow`/`ufw route allow` decide passage (ledgered rules), nft rewrites
+addresses (engine table)** - each mechanism doing the one thing it is built
+for.
+
 Releasing claims = delete engine drop-ins, delete the nft table, remove the
-ufw route rules, `sysctl --system`, restore ledgered originals.
+ufw rules (route and allow), `sysctl --system`, restore ledgered originals.
 
 ### 3.4 Pipeline and apply order
 
@@ -461,7 +482,7 @@ Apply order for an A→B diff:
     (write .tmp in same dir, fsync, rename; ledger newly claimed originals)
  6. sysctl --system
  7. Firewall: delete old wlanpi_mode table, nft -f staged NAT ruleset;
-    sync ufw route rules (delete A-only, add B-only)
+    sync ufw rules (route + app-profile allows: delete A-only, add B-only)
  8. ifup B's interfaces (hard timeouts; reuse utils/network_management.py patterns)
  9. Create namespaces, move interfaces, start namespace services (if declared)
 10. Enable + start B's services (hostapd before dnsmasq)
@@ -493,8 +514,8 @@ steps[], error}`. On wlanpi-core startup:
   ordering questions against ufw for no benefit, since wlanpi-core already
   runs at boot as root and owns the mode state. (Everything else persists on
   its own: drop-in files, service enablement, sysctl.d, ifupdown config, and
-  the ufw route rules, which ufw stores in `user.rules` and re-applies at
-  boot. Only the nft table is runtime state.)
+  the ufw rules, which ufw stores in `user.rules` and re-applies at boot.
+  Only the nft table is runtime state.)
 
 ### 3.6 Checkpoints: point-in-time restore (P4)
 
@@ -627,7 +648,10 @@ auto-activation (existing behavior) remains allowed only here.
 ### server
 - eth0: static `172.16.42.1/24`; wlan0: static `172.16.43.1/24`
 - dnsmasq serving both subnets; hostapd on wlan0
-- ser2net if installed (tolerate-missing flag; package Suggests)
+- ser2net if installed (tolerate-missing flag; package Suggests); serial
+  console TCP port ranges (2400-2408, 4800-4808, 9600-9608, 19200-19208,
+  38400-38408, 11520-11528, 2000-2008) opened via `firewall.allow` with a
+  shipped ufw app profile - one ledgered rule, symmetric release (§3.3)
 - TCP-tuning sysctl keys carried over from the legacy sysctl.conf as a drop-in
 - **`default_persist: false`** - single-boot by default, exactly like legacy;
   `POST /mode/switch {"mode":"server","persist":true}` replaces the
@@ -743,7 +767,8 @@ wlanpi_core/modes/                      # engine internals (new package)
         hostapd.py
         dnsmasq.py
         sysctl.py
-        firewall.py    # nft table (NAT) + ledgered ufw route rules (forwarding)
+        firewall.py    # nft table (NAT) + ledgered ufw rules (route allow for
+                       # forwarding, app-profile allow for inbound ports)
         services.py    # systemd enable/disable/start/stop via system_service
         netns.py       # wraps network_namespace_service
         files.py       # generic install/remove with ledger backup
