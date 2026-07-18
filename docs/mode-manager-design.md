@@ -14,7 +14,7 @@ WLAN Pi "modes" (classic, hotspot, server, wconsole) are implemented today as
 per-package bash switcher scripts (`hotspot_switcher`, `server_switcher`,
 `wconsole_switcher`) dispatched by wlanpi-common's `wlanpi-mode.sh`. Each switcher
 backs up ~7 live config files, symlinks in templates from `/etc/wlanpi-<mode>/`,
-enables services, writes `/etc/wlanpi-state`, and **reboots** — the reboot is the
+enables services, writes `/etc/wlanpi-state`, and **reboots** - the reboot is the
 only "apply" mechanism. The scripts are duplicated (no shared library), fragile
 (they cross-edit each other's configs, off-paths are asymmetric), and this model
 cannot be carried into bookworm/trixie.
@@ -26,13 +26,13 @@ Move mode management into **wlanpi-core** as a first-class feature:
 - A **mode is a bundle**: a small, documented, declarative package (a manifest plus
   config file payloads) that describes network configuration, services, sysctl,
   firewall rules, and (optionally) network namespaces.
-- A **mode engine** inside wlanpi-core applies bundles **live — no reboot** —
+- A **mode engine** inside wlanpi-core applies bundles **live - no reboot** -
   through a plan → apply → verify → commit/rollback pipeline with a crash-safe
   journal.
 - A mode is applied as an **overlay of claims** on top of the device's own base
   configuration. The engine records the pre-claim state of everything it touches
   in a **ledger**, so leaving a mode restores the device to *its current
-  configuration* — including changes the user made via the API — never to a
+  configuration* - including changes the user made via the API - never to a
   factory template. "Classic" is simply the empty overlay: no mode active.
 - Transitions go **directly from mode A to mode B** (diff of claims); there is no
   forced pass through classic.
@@ -56,7 +56,7 @@ flowchart TB
     subgraph core [wlanpi-core]
         API[mode API<br/>api/api_v1/endpoints/mode_api.py]
         SVC[ModeService<br/>services/mode_service.py]
-        subgraph engine [Mode engine — wlanpi_core/modes/]
+        subgraph engine [Mode engine - wlanpi_core/modes/]
             ENG[Engine<br/>plan / apply / verify / rollback]
             LED[(Ledger + Journal<br/>/var/lib/wlanpi-core/modes/)]
         end
@@ -105,7 +105,7 @@ flowchart TB
 ### Transition lifecycle
 
 Every switch is a diff: release the claims only mode A holds, apply the claims
-only mode B needs, reconfigure shared claims in place — all over the device's
+only mode B needs, reconfigure shared claims in place - all over the device's
 base configuration, which the engine never owns.
 
 ```mermaid
@@ -113,8 +113,8 @@ stateDiagram-v2
     [*] --> idle
     idle --> planned : POST /mode/switch<br/>(validate + plan, no system changes)
     planned --> in_progress : 202 returned,<br/>apply starts in background
-    in_progress --> committed : verify passed —<br/>/etc/wlanpi-state written
-    in_progress --> rolled_back : step or verify failed —<br/>ledgered state restored
+    in_progress --> committed : verify passed -<br/>/etc/wlanpi-state written
+    in_progress --> rolled_back : step or verify failed -<br/>ledgered state restored
     committed --> idle
     rolled_back --> idle
     note right of in_progress
@@ -171,7 +171,7 @@ already one.)
 
 Two pure approaches were considered and rejected:
 
-- **Verbatim files only** (the legacy template model): the engine is blind — it
+- **Verbatim files only** (the legacy template model): the engine is blind - it
   cannot know which interfaces/services a mode touches, so it cannot order a live
   transition, diff mode A against mode B, build the claims ledger, or validate an
   import. This is exactly the legacy fragility.
@@ -180,7 +180,7 @@ Two pure approaches were considered and rejected:
   daemons and would forever lag them. The WLAN Pi audience is precisely the crowd
   that wants advanced hostapd knobs.
 
-**The hybrid**: the manifest declares everything the *engine must reason about* —
+**The hybrid**: the manifest declares everything the *engine must reason about* -
 interfaces claimed and their addressing, services to enable/start/stop, sysctl
 keys, netns topology, template variables, verify checks, and the install target
 of each payload file. Daemon configs ship as files in `files/` written in the
@@ -191,9 +191,9 @@ their syntax.
 
 The accepted trade-off: mild duplication (an address may appear in both the
 manifest and a payload) and the possibility of a payload inconsistent with its
-manifest — caught by the native validators plus post-apply verify checks.
+manifest - caught by the native validators plus post-apply verify checks.
 
-### 2.3 Manifest schema (illustrative — hotspot)
+### 2.3 Manifest schema (illustrative - hotspot)
 
 ```yaml
 schema_version: 1
@@ -261,12 +261,12 @@ reconnect_hint:                # documented for API clients (§4.3)
 ### 2.4 Variables and generators
 
 Templating uses Jinja2 in a **SandboxedEnvironment** with only the `variables`
-map and read-only system facts (hostname, per-interface MACs) in scope — no
+map and read-only system facts (hostname, per-interface MACs) in scope - no
 filesystem access, no arbitrary Python.
 
 "Generate on first activation" is expressed with `generate:` + `persist: true`.
-Generators are **engine built-ins only** — `mac_suffix`, `random_passphrase`,
-`random_hex`, `hostname` — so bundles never execute code. Resolved values are
+Generators are **engine built-ins only** - `mac_suffix`, `random_passphrase`,
+`random_hex`, `hostname` - so bundles never execute code. Resolved values are
 stored in `/var/lib/wlanpi-core/modes/vars/<bundle>.json` and reused on
 re-activation. This reproduces the legacy hotspot behavior (unique SSID from the
 eth0 MAC, random passphrase generated once) declaratively.
@@ -316,8 +316,8 @@ and strictly validated (enforced in `wlanpi_core/modes/bundle.py`, exercised by
    signed/trusted-bundle tier could revisit this; explicitly out of scope now.)
 2. **Install-path allowlist** for `files[].dest` (prefix match, symlink-resolved,
    no `..`): `/etc/hostapd/`, `/etc/dnsmasq.d/`, `/etc/network/interfaces.d/`,
-   `/etc/sysctl.d/`, `/etc/nftables.d/`, `/etc/ser2net.conf`. The engine — never
-   the bundle — writes `/etc/wlanpi-state` and the interfaces include.
+   `/etc/sysctl.d/`, `/etc/nftables.d/`, `/etc/ser2net.conf`. The engine - never
+   the bundle - writes `/etc/wlanpi-state` and the interfaces include.
 3. **Service allowlist**, extending the existing `allowed_services` mechanism in
    `services/system_service.py`: `hostapd`, `dnsmasq`, `ser2net`,
    `wpa_supplicant@*`, `lldpd`, iperf/tftpd, `wlanpi-*`. Unknown units are
@@ -327,7 +327,7 @@ and strictly validated (enforced in `wlanpi_core/modes/bundle.py`, exercised by
 5. **Tarball hygiene**: reject absolute paths, `..` members, symlink/hardlink
    members; enforce a size cap.
 6. **Namespace policy**: only interface moves and allowlisted services inside
-   namespaces — no raw command execution.
+   namespaces - no raw command execution.
 7. Built-in bundle names (`classic`, `hotspot`, `server`, `bridge`) cannot be
    shadowed by imports.
 
@@ -335,11 +335,11 @@ and strictly validated (enforced in `wlanpi_core/modes/bundle.py`, exercised by
 
 ## 3. The mode engine
 
-### 3.1 Overlay/claims model — there is no "classic template"
+### 3.1 Overlay/claims model - there is no "classic template"
 
 The single most important design decision: **a mode is an overlay of *claims* on
-top of the device's live base configuration.** The base configuration —
-interfaces, VLANs, netns configs, anything the user set via the API or by hand —
+top of the device's live base configuration.** The base configuration -
+interfaces, VLANs, netns configs, anything the user set via the API or by hand -
 is never owned or rewritten by the engine.
 
 When a mode claims a resource, the engine records the *pre-claim state on this
@@ -350,24 +350,24 @@ backups directory):
 |---|---|
 | File installed | The original file content (or the fact it was absent) |
 | Interface claimed | Its prior stanza/addressing |
-| Service enabled/started/stopped | Its prior enabled + active state (e.g. *was* `wpa_supplicant@wlan0` enabled on this box — not "classic says enable it") |
+| Service enabled/started/stopped | Its prior enabled + active state (e.g. *was* `wpa_supplicant@wlan0` enabled on this box - not "classic says enable it") |
 | sysctl drop-in | Implicit: removing the drop-in + `sysctl --system` restores base |
 | nft table | Implicit: `nft delete table inet wlanpi_mode` |
 
 Consequences:
 
-- **"Classic" is the empty overlay** — no mode active — not a bundle of stock
+- **"Classic" is the empty overlay** - no mode active - not a bundle of stock
   configs. Switching to classic releases all claims by restoring the exact
   ledgered pre-claim state, so the device returns to *its current base
   configuration, including every change the user made via the API before
   entering the mode*.
 - User API changes to **unclaimed** resources made *while* a mode is active
-  persist naturally — the engine never touches them.
+  persist naturally - the engine never touches them.
 - Crash rollback restores ledgered state, never a factory template.
 
 **Claim conflict policy:** while a mode is active, API endpoints that would
 mutate an engine-claimed resource (e.g. reconfiguring the AP interface while in
-hotspot mode) return **409** — `core/mode_guard.py` grows a
+hotspot mode) return **409** - `core/mode_guard.py` grows a
 `require_unclaimed(resource)` dependency backed by the ledger. Unclaimed
 resources remain freely editable. The alternative ("allow and lose on mode
 exit") was rejected: silent loss is worse than an explicit conflict.
@@ -381,7 +381,7 @@ ledgered claims against B's planned claims:
 - Services both need → stay up; restarted only if their config changed.
 - Interfaces claimed by both → reconfigured in place.
 - A-only claims → released to base state; B-only claims → applied fresh
-  (ledgering their pre-claim state, which is still *base* state — A never
+  (ledgering their pre-claim state, which is still *base* state - A never
   touched them).
 
 Because the ledger always records base state (from before A), the sequence
@@ -409,14 +409,14 @@ Releasing claims = delete engine drop-ins, delete the nft table, `sysctl
 `services/mode_service.py` is the API-facing facade; `wlanpi_core/modes/engine.py`
 implements four phases:
 
-1. **Plan** — load and validate the target bundle; resolve variables (running
+1. **Plan** - load and validate the target bundle; resolve variables (running
    generators if unset); render templates to a staging directory; run native
    validators; diff against current claims; produce an ordered step list.
    **Zero system changes**; any failure aborts cleanly.
-2. **Apply** — execute the steps below, journaling before/after each.
-3. **Verify** — bundle `verify` checks plus engine invariants (claimed
+2. **Apply** - execute the steps below, journaling before/after each.
+3. **Verify** - bundle `verify` checks plus engine invariants (claimed
    interfaces up, enabled services active within timeout).
-4. **Commit or Rollback** — on success write `/etc/wlanpi-state` and mark the
+4. **Commit or Rollback** - on success write `/etc/wlanpi-state` and mark the
    journal `committed`; on failure walk the journal backwards restoring
    ledgered state, mark `rolled_back`, and record the failing step for the
    status API.
@@ -459,14 +459,14 @@ steps[], error}`. On wlanpi-core startup:
 
 The ledger restores exactly one level: base config + current mode overlay.
 Deeper history ("get me back to how the box was configured yesterday, in
-server mode, before I changed X") is delivered in P4 as **checkpoints** —
+server mode, before I changed X") is delivered in P4 as **checkpoints** -
 named point-in-time snapshots of the *managed config surface*: the same
 files, interface configs, and service enable/active states the ledger
 already knows how to capture and restore.
 
-- `POST /api/v1/system/checkpoints` — create a named checkpoint;
-  `GET .../checkpoints` — list; `POST .../checkpoints/{id}/restore` —
-  restore; `DELETE .../checkpoints/{id}` — remove.
+- `POST /api/v1/system/checkpoints` - create a named checkpoint;
+  `GET .../checkpoints` - list; `POST .../checkpoints/{id}/restore` -
+  restore; `DELETE .../checkpoints/{id}` - remove.
 - The engine **auto-checkpoints before every mode switch**, so "back to how
   things were before I switched to hotspot" is always one restore away.
 - Restore reuses the transition machinery unchanged: it is a plan → apply →
@@ -476,13 +476,13 @@ already knows how to capture and restore.
   retention policy (count- and age-based pruning; auto-checkpoints pruned
   more aggressively than named ones).
 - Scope and honesty about limits: a checkpoint captures the managed surface
-  only — changes made entirely outside wlanpi-core's managed files/services
+  only - changes made entirely outside wlanpi-core's managed files/services
   (e.g. hand edits to unrelated system config over SSH) are not captured.
 
 **Considered and rejected: per-change journaling** (append-only before/after
 journal of every mutating API call, with rollback to an arbitrary change).
-It offers finer granularity — surgically undoing one change while keeping
-later ones — but requires every mutating endpoint in wlanpi-core to
+It offers finer granularity - surgically undoing one change while keeping
+later ones - but requires every mutating endpoint in wlanpi-core to
 participate in journaling forever, reopens the claimed-resource 409 policy
 (§3.1) with a third "user override" layer, and introduces history-fork and
 drift semantics. Checkpoints deliver most of the practical value ("go back
@@ -508,7 +508,7 @@ the valid-mode list extends to dynamically include installed bundle names.
 
 New router `api/api_v1/endpoints/mode_api.py`, registered in
 `api/api_v1/api.py`, authenticated with the existing `verify_auth_wrapper`
-(localhost HMAC / remote JWT / OTG) — consistent with today's reboot and
+(localhost HMAC / remote JWT / OTG) - consistent with today's reboot and
 service-control endpoints. Errors use the existing `ValidationError(msg,
 status_code)` convention.
 
@@ -519,7 +519,7 @@ status_code)` convention.
 | `POST /api/v1/mode/switch` | Body `{mode, persist?}`. Validates + plans synchronously (fast, no system changes); returns **202 Accepted** `{transition_id}`; apply runs in the background |
 | `GET /api/v1/mode/transition` (`/{id}`) | Journal-backed status: state, step *x/y*, human-readable step label, error detail |
 | `GET /api/v1/mode/bundles/{name}` | Bundle manifest + metadata |
-| `GET /api/v1/mode/bundles/{name}/export` | Tarball download (`application/gzip`); works for built-ins too — the documented starting point for customization |
+| `GET /api/v1/mode/bundles/{name}/export` | Tarball download (`application/gzip`); works for built-ins too - the documented starting point for customization |
 | `POST /api/v1/mode/bundles` | Multipart tarball upload; full §2.7 validation; `?validate_only=true` for dry-run; 409 on collision with built-in names |
 | `PUT /api/v1/mode/bundles/{name}` | Replace a user bundle |
 | `DELETE /api/v1/mode/bundles/{name}` | Remove a user bundle (409 if currently active) |
@@ -537,14 +537,14 @@ request rides on (eth0 re-addressed, wlan0 torn down). Addressed explicitly:
 - Switch is **202 + background apply + polling**, never a blocking 200. The
   response is sent *before* any network-touching step runs (immediately after
   plan + journal write).
-- Remote callers reconnect — possibly at a new address — and poll
+- Remote callers reconnect - possibly at a new address - and poll
   `GET /mode/transition`. Each bundle's `reconnect_hint` metadata documents the
   expected post-switch addresses so clients know where to reconnect.
 - Polling, not the websocket streaming API, is the primary mechanism: a
   websocket dies with the network path exactly when status is needed; the
   journal-backed poll endpoint returns full state after reconnect. A streaming
   feed can be layered on later for localhost consumers.
-- Localhost (HMAC) and OTG callers — FPMS, the front panel — are unaffected by
+- Localhost (HMAC) and OTG callers - FPMS, the front panel - are unaffected by
   the path cut and can poll continuously for progress display.
 
 ### 4.2 Concurrency and the single worker
@@ -561,19 +561,19 @@ An asyncio lock plus journal check rejects concurrent switches with 409.
 Built-in bundles ship read-only in `/usr/share/wlanpi-core/modes/<name>/` (via
 `debian/wlanpi-core.install`); user bundles live in
 `/etc/wlanpi-core/modes/<name>/`; engine state (ledger, journal, backups,
-generated variables) in `/var/lib/wlanpi-core/modes/` — root-owned system state
+generated variables) in `/var/lib/wlanpi-core/modes/` - root-owned system state
 belongs in `/var/lib`, unlike the per-user netcfg idiom. Built-in names always
 win lookup.
 
 ### classic
-Not a bundle — the **empty overlay** (no claims). Listed in `/mode/list` and
+Not a bundle - the **empty overlay** (no claims). Listed in `/mode/list` and
 switchable like any mode: "switch to classic" releases all claims, restoring the
 device's own base configuration, whatever the user has made it. Netns
 auto-activation (existing behavior) remains allowed only here.
 
 ### hotspot
 - eth0: DHCP client (upstream); wlan0: static `172.16.43.1/24`
-- hostapd on wlan0 — SSID/passphrase from persisted `mac_suffix` /
+- hostapd on wlan0 - SSID/passphrase from persisted `mac_suffix` /
   `random_passphrase` generators (preserves legacy personalization)
 - dnsmasq: `dhcp-range=172.16.43.50,172.16.43.150`, bound to wlan0
   (`bind-interfaces` / `except-interface=eth0`)
@@ -586,7 +586,7 @@ auto-activation (existing behavior) remains allowed only here.
 - dnsmasq serving both subnets; hostapd on wlan0
 - ser2net if installed (tolerate-missing flag; package Suggests)
 - TCP-tuning sysctl keys carried over from the legacy sysctl.conf as a drop-in
-- **`default_persist: false`** — single-boot by default, exactly like legacy;
+- **`default_persist: false`** - single-boot by default, exactly like legacy;
   `POST /mode/switch {"mode":"server","persist":true}` replaces the
   `/etc/wlanpi-stay-in-server-mode` flag
 
@@ -596,7 +596,7 @@ re-specified with modern tooling:
 
 - Kernel bridge `br0` with `bridge_ports eth0` (ifupdown bridge stanza;
   `bridge-utils` dependency); `br0` runs as DHCP client for management
-- wlan0 joins as an **AP** via hostapd `bridge=br0` — the clean, fully supported
+- wlan0 joins as an **AP** via hostapd `bridge=br0` - the clean, fully supported
   path; AP-side bridging needs no 4addr hacks
 - Result: wired and Wi-Fi AP clients on one flat L2 segment; the Pi manageable
   on br0; no NAT, no DHCP server
@@ -617,10 +617,10 @@ re-specified with modern tooling:
   is in a *legacy-applied* non-classic mode, restore the legacy `.suffix`
   backups the switchers left beside each swapped file (deterministic, documented
   paths), write `classic`, and log a "re-apply your mode via the API" notice.
-  Best effort: if backups are missing, leave files in place and report — the
+  Best effort: if backups are missing, leave files in place and report - the
   engine never fabricates a "stock" config. This is the only legacy-aware code;
   the engine itself needs no legacy knowledge.
-- **FPMS**: unchanged on day one — it reads `/etc/wlanpi-state`, which the engine
+- **FPMS**: unchanged on day one - it reads `/etc/wlanpi-state`, which the engine
   keeps writing. Follow-up (separate repo): FPMS switches modes via
   `POST /mode/switch` over localhost HMAC and polls transition status for its
   progress screen, deleting its own switcher-invocation code.
@@ -635,41 +635,41 @@ re-specified with modern tooling:
 
 | Phase | Scope | Exit criteria |
 |---|---|---|
-| **P1 — Engine + built-ins + switch API** | `wlanpi_core/modes/` package (bundle loader, ledger, journal, engine, appliers for interfaces/hostapd/dnsmasq/sysctl/nftables/services/files), systemd enable/disable D-Bus additions, `mode_service.py`, `mode_api.py` (`GET /mode`, `/mode/list`, `POST /mode/switch`, `GET /mode/transition`), variables/generators (hotspot needs them), four built-in bundles, boot-time journal recovery + ephemeral release, packaging changes + legacy-restore shim | Live round-trips classic↔hotspot↔server↔bridge; rollback on induced failure; reboot persistence and `persist:false` semantics verified |
-| **P2 — Custom bundles + import/export** | Tarball pack/unpack, full §2.7 validation policy, bundle CRUD/export/import/validate endpoints, bundle-format authoring documentation (the "well-documented format" deliverable), FPMS integration follow-up | A user-authored bundle exported, edited, re-imported, and activated via API only |
-| **P3 — Namespace primitives** | `namespaces:` manifest section, netns applier bridging to `network_namespace_service` (incl. services-in-namespace), interaction rules with netcfg auto-activation, example namespaced custom bundle + docs | Example bundle activates with an isolated interface + service; clean release on mode exit |
-| **P4 — Checkpoints** (§3.6) | Snapshot/restore of the managed config surface reusing the ledger + transition machinery; checkpoint CRUD/restore API; auto-checkpoint before every mode switch; retention/pruning policy | Create checkpoint → switch modes → change config → restore checkpoint returns the box to the captured state (mode included); auto-checkpoints prunable and restorable |
+| **P1 - Engine + built-ins + switch API** | `wlanpi_core/modes/` package (bundle loader, ledger, journal, engine, appliers for interfaces/hostapd/dnsmasq/sysctl/nftables/services/files), systemd enable/disable D-Bus additions, `mode_service.py`, `mode_api.py` (`GET /mode`, `/mode/list`, `POST /mode/switch`, `GET /mode/transition`), variables/generators (hotspot needs them), four built-in bundles, boot-time journal recovery + ephemeral release, packaging changes + legacy-restore shim | Live round-trips classic↔hotspot↔server↔bridge; rollback on induced failure; reboot persistence and `persist:false` semantics verified |
+| **P2 - Custom bundles + import/export** | Tarball pack/unpack, full §2.7 validation policy, bundle CRUD/export/import/validate endpoints, bundle-format authoring documentation (the "well-documented format" deliverable), FPMS integration follow-up | A user-authored bundle exported, edited, re-imported, and activated via API only |
+| **P3 - Namespace primitives** | `namespaces:` manifest section, netns applier bridging to `network_namespace_service` (incl. services-in-namespace), interaction rules with netcfg auto-activation, example namespaced custom bundle + docs | Example bundle activates with an isolated interface + service; clean release on mode exit |
+| **P4 - Checkpoints** (§3.6) | Snapshot/restore of the managed config surface reusing the ledger + transition machinery; checkpoint CRUD/restore API; auto-checkpoint before every mode switch; retention/pruning policy | Create checkpoint → switch modes → change config → restore checkpoint returns the box to the captured state (mode included); auto-checkpoints prunable and restorable |
 
 ---
 
 ## 8. Risks and mitigations
 
-1. **Cutting the client's own network path mid-transition** — 202-before-apply
+1. **Cutting the client's own network path mid-transition** - 202-before-apply
    ordering, journal-backed polling, per-bundle `reconnect_hint`; residual risk
    documented for API consumers.
-2. **Single gunicorn worker blocked by a multi-second transition** — apply runs
+2. **Single gunicorn worker blocked by a multi-second transition** - apply runs
    in an executor thread behind a concurrency lock; ifup/service-start steps get
    hard timeouts (reuse the `restart_dhcp_with_timeout` pattern in
    `utils/network_management.py`) so a hung dhclient cannot wedge the engine.
-3. **hostapd/dnsmasq interactions with existing code** —
+3. **hostapd/dnsmasq interactions with existing code** -
    `hotspot_service._resolve_hostapd_conf()` must learn the engine's conf path
    (small P1 change); `wpa_supplicant@wlan0` must be stopped before hostapd
    claims wlan0 and is restored from the ledger on exit.
-4. **nftables/ufw coexistence** — engine rules live in a dedicated table, but
+4. **nftables/ufw coexistence** - engine rules live in a dedicated table, but
    hook-priority interactions with ufw's chains need explicit testing (NAT and
    forwarding must work with ufw enabled).
-5. **Power loss / journal edge cases** — atomic journal writes + idempotent
+5. **Power loss / journal edge cases** - atomic journal writes + idempotent
    steps + rollback-on-boot; worst case is boot-to-base-config (classic), never
    a bricked network.
-6. **dnsmasq port 53** — `bind-interfaces`/`except-interface` required so DNS
+6. **dnsmasq port 53** - `bind-interfaces`/`except-interface` required so DNS
    binding does not collide with local resolvers; enforced in shipped configs
    and checked by `dnsmasq --test`.
-7. **Legacy-restore shim is best-effort** — missing `.suffix` backups are
+7. **Legacy-restore shim is best-effort** - missing `.suffix` backups are
    reported, not guessed at.
 
 ---
 
-## Appendix A — Proposed code layout
+## Appendix A - Proposed code layout
 
 ```
 wlanpi_core/modes/                      # engine internals (new package)
@@ -695,19 +695,19 @@ wlanpi_core/schemas/modes/              # bundle.py, transition.py
 /var/lib/wlanpi-core/modes/             # ledger.json, transition.json, backups/, vars/
 ```
 
-## Appendix B — Worked example: the hotspot bundle, end to end
+## Appendix B - Worked example: the hotspot bundle, end to end
 
 The complete built-in hotspot bundle as shipped in
 `/usr/share/wlanpi-core/modes/hotspot/`. Four files total.
 
 ### `manifest.yaml`
 
-See §2.3 — that example *is* the hotspot manifest.
+See §2.3 - that example *is* the hotspot manifest.
 
 ### `files/hostapd.conf` (`template: true`)
 
 ```ini
-# WLAN Pi hotspot mode — installed to /etc/hostapd/wlanpi-mode.conf
+# WLAN Pi hotspot mode - installed to /etc/hostapd/wlanpi-mode.conf
 # {{ ssid }} and {{ passphrase }} are resolved by the engine (generated once,
 # then persisted in /var/lib/wlanpi-core/modes/vars/hotspot.json)
 interface=wlan0
@@ -724,19 +724,19 @@ channel=6
 ieee80211n=1
 ieee80211d=1
 wmm_enabled=1
-# country_code intentionally omitted — regulatory domain is managed
+# country_code intentionally omitted - regulatory domain is managed
 # device-wide by wlanpi-reg-domain, not per mode
 ```
 
 A user customizing this bundle (export → edit → import) can add any hostapd
-option here — `hw_mode=a`, 802.11ax settings, a RADIUS block — without
+option here - `hw_mode=a`, 802.11ax settings, a RADIUS block - without
 wlanpi-core needing to understand it. Only the install destination is
 constrained.
 
 ### `files/dnsmasq.conf`
 
 ```ini
-# WLAN Pi hotspot mode — installed to /etc/dnsmasq.d/wlanpi-mode.conf
+# WLAN Pi hotspot mode - installed to /etc/dnsmasq.d/wlanpi-mode.conf
 # bind only where we serve; never fight a local resolver on eth0
 bind-interfaces
 interface=wlan0
@@ -750,7 +750,7 @@ dhcp-option=option:dns-server,172.16.43.1
 ### `files/nftables.nft`
 
 ```
-# WLAN Pi hotspot mode — installed to /etc/nftables.d/wlanpi-mode.nft
+# WLAN Pi hotspot mode - installed to /etc/nftables.d/wlanpi-mode.nft
 # Import validation enforces that ONLY table inet wlanpi_mode* is defined,
 # so releasing the mode is always: nft delete table inet wlanpi_mode
 table inet wlanpi_mode {
@@ -770,7 +770,7 @@ table inet wlanpi_mode {
 
 `POST /api/v1/mode/switch {"mode": "hotspot"}` from classic:
 
-**Plan** (no system changes): resolve `ssid`/`passphrase` — first activation
+**Plan** (no system changes): resolve `ssid`/`passphrase` - first activation
 runs the `mac_suffix` and `random_passphrase` generators and persists the
 values (e.g. `ssid: WLANPi_9a2f3c`); later activations reuse them. Render
 `hostapd.conf` in the Jinja2 sandbox; validate payloads (`nft -c -f`,
@@ -786,33 +786,33 @@ recorded; each installed file → "did not exist".
 **Apply**: 202 returned first → stop `wpa_supplicant@wlan0` → `ifdown` wlan0 →
 install the three files + `interfaces.d/wlanpi-mode` + sysctl drop-in →
 `sysctl --system` → `nft -f` → `ifup wlan0` (eth0 already DHCP, untouched in
-practice — a claim over an identical config is a no-op) → enable+start
+practice - a claim over an identical config is a no-op) → enable+start
 hostapd, then dnsmasq → **verify**: both services active, wlan0 has
 172.16.43.1 → write `hotspot` to `/etc/wlanpi-state`, commit journal.
 
-**Switch back to classic**: every claim is released to its *ledgered* state —
+**Switch back to classic**: every claim is released to its *ledgered* state -
 `wpa_supplicant@wlan0` re-enabled and started *because it was before*, not
 because a template says so; drop-ins deleted; `nft delete table inet
 wlanpi_mode`; wlan0 restored to its pre-mode config. If the user had, say, a
 static eth0 config set via the API before entering hotspot mode, that is
 exactly what comes back.
 
-**Direct hotspot → server**: diff, not teardown — `hostapd` and `dnsmasq` stay
+**Direct hotspot → server**: diff, not teardown - `hostapd` and `dnsmasq` stay
 up (restarted once with server's configs), `wlan0` keeps 172.16.43.1/24
 (identical claim, no-op), `eth0` is reconfigured DHCP → static 172.16.42.1/24,
 the nft table is replaced, `ser2net` starts. The eth0 ledger entry still
 records its original pre-hotspot state, so a later switch to classic restores
 the true base config.
 
-## Appendix C — Key existing code reused
+## Appendix C - Key existing code reused
 
 | Existing code | Role in mode engine |
 |---|---|
-| `services/system_service.py` — systemd D-Bus layer, `allowed_services`, `get_mode()` | Service lifecycle (extended with enable/disable), mode read, allowlist |
-| `core/mode_guard.py` — `require_mode()` | Extended with `require_unclaimed()` claim conflicts |
-| `utils/general.py` — `run_command` / `run_command_async` | All shell-outs (`ifup`, `nft`, `sysctl`, validators) |
+| `services/system_service.py` - systemd D-Bus layer, `allowed_services`, `get_mode()` | Service lifecycle (extended with enable/disable), mode read, allowlist |
+| `core/mode_guard.py` - `require_mode()` | Extended with `require_unclaimed()` claim conflicts |
+| `utils/general.py` - `run_command` / `run_command_async` | All shell-outs (`ifup`, `nft`, `sysctl`, validators) |
 | `services/network_namespace_service.py` + `wlanpi_core/namespaces/` | Netns primitive (`revert_to_root`, phy moves, processes) |
-| `utils/network_management.py` — DHCP/route helpers with timeouts | Timeout patterns for ifup/dhclient steps |
-| `models/network/vlan/` — `interfaces.d/vlans` writer | Coexistence precedent for the `interfaces.d/wlanpi-mode` drop-in |
-| `core/auth.py` — `verify_auth_wrapper` | Auth for all mode endpoints |
+| `utils/network_management.py` - DHCP/route helpers with timeouts | Timeout patterns for ifup/dhclient steps |
+| `models/network/vlan/` - `interfaces.d/vlans` writer | Coexistence precedent for the `interfaces.d/wlanpi-mode` drop-in |
+| `core/auth.py` - `verify_auth_wrapper` | Auth for all mode endpoints |
 | `models/validation_error.py` | Error convention (404/409/422/503) |
