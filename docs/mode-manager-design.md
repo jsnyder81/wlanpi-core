@@ -455,7 +455,40 @@ steps[], error}`. On wlanpi-core startup:
   release the mode's claims at boot, matching legacy server-mode single-boot
   semantics.
 
-### 3.6 Prerequisite: systemd enable/disable over D-Bus
+### 3.6 Checkpoints: point-in-time restore (P4)
+
+The ledger restores exactly one level: base config + current mode overlay.
+Deeper history ("get me back to how the box was configured yesterday, in
+server mode, before I changed X") is delivered in P4 as **checkpoints** —
+named point-in-time snapshots of the *managed config surface*: the same
+files, interface configs, and service enable/active states the ledger
+already knows how to capture and restore.
+
+- `POST /api/v1/system/checkpoints` — create a named checkpoint;
+  `GET .../checkpoints` — list; `POST .../checkpoints/{id}/restore` —
+  restore; `DELETE .../checkpoints/{id}` — remove.
+- The engine **auto-checkpoints before every mode switch**, so "back to how
+  things were before I switched to hotspot" is always one restore away.
+- Restore reuses the transition machinery unchanged: it is a plan → apply →
+  verify → rollback run whose target is a snapshot instead of a bundle, with
+  the same journal, crash safety, and 202-then-poll API behavior.
+- Storage under `/var/lib/wlanpi-core/modes/checkpoints/`, with a bounded
+  retention policy (count- and age-based pruning; auto-checkpoints pruned
+  more aggressively than named ones).
+- Scope and honesty about limits: a checkpoint captures the managed surface
+  only — changes made entirely outside wlanpi-core's managed files/services
+  (e.g. hand edits to unrelated system config over SSH) are not captured.
+
+**Considered and rejected: per-change journaling** (append-only before/after
+journal of every mutating API call, with rollback to an arbitrary change).
+It offers finer granularity — surgically undoing one change while keeping
+later ones — but requires every mutating endpoint in wlanpi-core to
+participate in journaling forever, reopens the claimed-resource 409 policy
+(§3.1) with a third "user override" layer, and introduces history-fork and
+drift semantics. Checkpoints deliver most of the practical value ("go back
+to a known-good point in time") on machinery the engine already has.
+
+### 3.7 Prerequisite: systemd enable/disable over D-Bus
 
 `services/system_service.py` exposes start/stop/restart via
 `org.freedesktop.systemd1` but not enable/disable. Add
@@ -463,7 +496,7 @@ steps[], error}`. On wlanpi-core startup:
 `Manager.EnableUnitFiles` / `DisableUnitFiles` (+ `Reload`), guarded by the same
 allowlist and reusing the existing D-Bus error/reconnect handling.
 
-### 3.7 Compatibility surface
+### 3.8 Compatibility surface
 
 `/etc/wlanpi-state` remains the compatibility surface, written on commit. FPMS,
 `system_service.get_mode()`, and `core/mode_guard.py` keep working unmodified;
@@ -605,6 +638,7 @@ re-specified with modern tooling:
 | **P1 — Engine + built-ins + switch API** | `wlanpi_core/modes/` package (bundle loader, ledger, journal, engine, appliers for interfaces/hostapd/dnsmasq/sysctl/nftables/services/files), systemd enable/disable D-Bus additions, `mode_service.py`, `mode_api.py` (`GET /mode`, `/mode/list`, `POST /mode/switch`, `GET /mode/transition`), variables/generators (hotspot needs them), four built-in bundles, boot-time journal recovery + ephemeral release, packaging changes + legacy-restore shim | Live round-trips classic↔hotspot↔server↔bridge; rollback on induced failure; reboot persistence and `persist:false` semantics verified |
 | **P2 — Custom bundles + import/export** | Tarball pack/unpack, full §2.7 validation policy, bundle CRUD/export/import/validate endpoints, bundle-format authoring documentation (the "well-documented format" deliverable), FPMS integration follow-up | A user-authored bundle exported, edited, re-imported, and activated via API only |
 | **P3 — Namespace primitives** | `namespaces:` manifest section, netns applier bridging to `network_namespace_service` (incl. services-in-namespace), interaction rules with netcfg auto-activation, example namespaced custom bundle + docs | Example bundle activates with an isolated interface + service; clean release on mode exit |
+| **P4 — Checkpoints** (§3.6) | Snapshot/restore of the managed config surface reusing the ledger + transition machinery; checkpoint CRUD/restore API; auto-checkpoint before every mode switch; retention/pruning policy | Create checkpoint → switch modes → change config → restore checkpoint returns the box to the captured state (mode included); auto-checkpoints prunable and restorable |
 
 ---
 
