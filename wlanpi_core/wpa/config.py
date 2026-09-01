@@ -6,7 +6,7 @@ including global headers and network blocks.
 """
 import logging
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 from wlanpi_core.schemas.network.network import (
     NamespaceConfig,
@@ -26,6 +26,7 @@ def _quote_wpa_value(value: str) -> str:
 def generate_global_header(
     ctrl_interface: str = "/run/wpa_supplicant",
     update_config: int = 1,
+    mld: Optional[dict] = None,
 ) -> str:
     """
     Generate the global header for wpa_supplicant configuration.
@@ -33,6 +34,9 @@ def generate_global_header(
     Args:
         ctrl_interface: Control interface path
         update_config: Update config flag (0 or 1)
+        mld: Optional MLD link-setup options (force_single_link,
+            connect_band_pref, connect_bssid_pref). These are global fields
+            and must never appear inside a network block.
 
     Returns:
         Global header string
@@ -46,6 +50,15 @@ def generate_global_header(
         f"update_config={update_config}",
         f"sae_pwe=2",  # SAE PWE in global context
     ]
+    if mld:
+        if mld.get("force_single_link"):
+            lines.append("mld_force_single_link=1")
+        band_pref = mld.get("connect_band_pref")
+        if band_pref:
+            lines.append(f"mld_connect_band_pref={band_pref}")
+        bssid_pref = mld.get("connect_bssid_pref")
+        if bssid_pref:
+            lines.append(f"mld_connect_bssid_pref={bssid_pref}")
     return "\n".join(lines)
 
 
@@ -141,6 +154,10 @@ def generate_network_block(
     if cfg.mlo:
         lines.append("    mlo=1")
 
+    freq_list = getattr(cfg.security, "freq_list", None)
+    if freq_list:
+        lines.append("    freq_list=" + " ".join(str(freq) for freq in freq_list))
+
     lines.append("}")
     return "\n".join(lines)
 
@@ -168,6 +185,11 @@ def write_wpa_config(
         >>> write_wpa_config(config, Path("/etc/wpa_supplicant"), {"ctrl_interface": "/run/wpa_supplicant"})
     """
     iface = cfg.iface_display_name or cfg.interface
+
+    mld = getattr(cfg, "mld", None)
+    mld_options = (
+        mld.model_dump() if mld is not None and hasattr(mld, "model_dump") else mld
+    )
 
     # Validate security.ssid exists before accessing
     if not cfg.security or not hasattr(cfg.security, 'ssid') or not cfg.security.ssid:
@@ -226,6 +248,7 @@ def write_wpa_config(
         global_header = generate_global_header(
             ctrl_interface=global_settings.get('ctrl_interface', '/run/wpa_supplicant'),
             update_config=global_settings.get('update_config', 1),
+            mld=mld_options,
         )
 
         with conf_path.open("w") as f:

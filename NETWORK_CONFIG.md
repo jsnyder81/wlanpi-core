@@ -44,7 +44,12 @@ security ↓
     client_cert:    optional
     private_key:    optional
     ca_cert:        optional
+    freq_list:      optional list of center frequencies in MHz bounding the MLO link set, e.g. [5640, 5975] (needs wpa_supplicant 2.12)
 mlo:                whether to use mlo or not (optional, default False)
+mld ↓               optional Wi-Fi 7 MLD link-setup controls (written to the supplicant global header, never inside network blocks)
+    force_single_link: associate one link only — the non-MLO control (optional, default False; conflicts with mlo)
+    connect_band_pref: band to anchor the association link on: 1=2.4, 2=5, 3=6 GHz (optional)
+    connect_bssid_pref: AP link BSSID to anchor the association link on (optional)
 default_route:      whether to set this namespace as the default route (default False)
 autostart_app:      name of the app defined in the apps list above (optional)
 ```

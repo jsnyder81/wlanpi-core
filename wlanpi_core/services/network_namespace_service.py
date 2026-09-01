@@ -151,6 +151,15 @@ class NetworkNamespaceService:
         if hasattr(cfg, 'mlo') and cfg.mlo is not None and not isinstance(cfg.mlo, bool):
             errors.append("mlo must be a boolean")
         
+        mld = getattr(cfg, 'mld', None)
+        if mld is not None:
+            if isinstance(mld, dict):
+                force_single = mld.get('force_single_link', False)
+            else:
+                force_single = getattr(mld, 'force_single_link', False)
+            if force_single and getattr(cfg, 'mlo', False):
+                errors.append("mld.force_single_link conflicts with mlo=true")
+        
         if errors:
             error_msg = "; ".join(errors)
             return False, f"Config validation failed: {error_msg}"

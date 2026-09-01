@@ -8,6 +8,7 @@ _INTERFACE_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,14}$")
 _NAMESPACE_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,62}$")
 _CONFIG_ID_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,63}$")
 _PHY_NAME_RE = re.compile(r"^phy[0-9]{1,10}$")
+_MAC_ADDRESS_RE = re.compile(r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
 
 def _validate_name(value: str, pattern: re.Pattern[str], label: str) -> str:
@@ -60,6 +61,13 @@ def validate_wifi_frequency(value: int) -> int:
     if not (in_24_ghz_band or in_5_or_6_ghz_band):
         raise ValueError("Wi-Fi frequency is outside the supported range")
     return value
+
+
+def validate_mac_address(value: str) -> str:
+    """Validate a colon-separated 802.11 MAC address and normalize to lowercase."""
+    if not isinstance(value, str) or not _MAC_ADDRESS_RE.fullmatch(value):
+        raise ValueError("invalid MAC address")
+    return value.lower()
 
 
 def validate_ssid(value: str) -> str:

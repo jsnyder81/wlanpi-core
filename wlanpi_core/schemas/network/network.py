@@ -1,14 +1,16 @@
 from enum import Enum
-from typing import Any, List, Optional, Union
+from typing import Any, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Extra, Field, field_validator, model_validator
 
 from wlanpi_core.utils.validation import (
     validate_config_id,
     validate_interface_name,
+    validate_mac_address,
     validate_namespace_name,
     validate_phy_name,
     validate_ssid,
+    validate_wifi_frequency,
     validate_wpa_text,
 )
 
@@ -125,11 +127,28 @@ class NetSecurity(BaseModel):
     client_cert: Optional[str] = None
     private_key: Optional[str] = None
     ca_cert: Optional[str] = None
+    freq_list: Optional[list[int]] = Field(
+        default=None,
+        description=(
+            "Restrict the MLO link set (and scan) to these center frequencies "
+            "in MHz, e.g. [5640, 5975]. Requires wpa_supplicant 2.12; ignored "
+            "for link setup on 2.11."
+        ),
+    )
 
     @field_validator("ssid")
     @classmethod
     def validate_ssid_field(cls, value: str) -> str:
         return validate_ssid(value)
+
+    @field_validator("freq_list")
+    @classmethod
+    def validate_freq_list_field(cls, value: Optional[list[int]]) -> Optional[list[int]]:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("freq_list must not be empty when provided")
+        return [validate_wifi_frequency(freq) for freq in value]
 
     @field_validator(
         "psk",
@@ -151,6 +170,33 @@ class NetSecurity(BaseModel):
     __repr__ = __str__
 
 
+class MldOptions(BaseModel):
+    """Wi-Fi 7 MLD link-setup controls written to the supplicant global header."""
+
+    force_single_link: bool = Field(
+        default=False,
+        description=(
+            "mld_force_single_link=1 — associate exactly one link; the "
+            "non-MLO baseline control."
+        ),
+    )
+    connect_band_pref: Optional[Literal[1, 2, 3]] = Field(
+        default=None,
+        description="mld_connect_band_pref: 1=2.4 GHz, 2=5 GHz, 3=6 GHz",
+    )
+    connect_bssid_pref: Optional[str] = Field(
+        default=None,
+        description="mld_connect_bssid_pref — pin the association link to this AP BSSID",
+    )
+
+    @field_validator("connect_bssid_pref")
+    @classmethod
+    def validate_connect_bssid_field(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return validate_mac_address(value)
+
+
 class RootConfig(BaseModel):
     mode: NetworkModeEnum = NetworkModeEnum.managed
     iface_display_name: str
@@ -158,8 +204,15 @@ class RootConfig(BaseModel):
     interface: str
     security: Optional[NetSecurity] = None
     mlo: bool = False
+    mld: Optional[MldOptions] = None
     default_route: bool = False
     autostart_app: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_mlo_mld_conflict(self) -> "RootConfig":
+        if self.mlo and self.mld is not None and self.mld.force_single_link:
+            raise ValueError("mld.force_single_link conflicts with mlo=true")
+        return self
 
     @field_validator("interface", "iface_display_name")
     @classmethod

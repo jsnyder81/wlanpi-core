@@ -220,6 +220,26 @@ def handle_validate_default_route_non_bool(namespace_service, netcfg_env, scenar
     assert "default_route must be a boolean" in result.response.selectErr
 
 
+def handle_validate_mld_force_single_link_conflicts_mlo(namespace_service, netcfg_env, scenario: Scenario):
+    cfg = RootConfig.model_construct(
+        mode=NetworkModeEnum.managed,
+        iface_display_name="wlan0",
+        phy="phy0",
+        interface="wlan0",
+        default_route=False,
+        autostart_app=None,
+        security=None,
+        mlo=True,
+        mld={"force_single_link": True},
+    )
+    with warnings.catch_warnings():
+        # intentionally-invalid model; pydantic serializer warnings are expected
+        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+        result = namespace_service.activate_config(cfg)
+    assert result.status == "error"
+    assert "mld.force_single_link conflicts with mlo=true" in result.response.selectErr
+
+
 def handle_validate_netconfig_malformed_json(namespace_service, netcfg_env, scenario: Scenario):
     (netcfg_env["cfg_dir"] / "test_bad.json").write_text("{not valid json")
     with pytest.raises(ConfigMalformedError) as exc:
@@ -817,6 +837,7 @@ HANDLERS = {
     "validate_empty_phy": handle_validate_empty_phy,
     "validate_invalid_mode": handle_validate_invalid_mode,
     "validate_invalid_security_type": handle_validate_invalid_security_type,
+    "validate_mld_force_single_link_conflicts_mlo": handle_validate_mld_force_single_link_conflicts_mlo,
     "validate_netconfig_empty_file": handle_validate_netconfig_empty_file,
     "validate_netconfig_invalid_root_shape": handle_validate_netconfig_invalid_root_shape,
     "validate_netconfig_malformed_json": handle_validate_netconfig_malformed_json,
