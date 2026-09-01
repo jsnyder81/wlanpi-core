@@ -36,6 +36,16 @@ from wlanpi_core.api.api_v1.endpoints import network_api, network_info_api
             network_api._read_interface_link_stats,
             {"iface": "eth0"},
         ),
+        (
+            network_api.show_interface_mlo_links,
+            network_api._read_interface_mlo_links,
+            {"iface": "wlan0"},
+        ),
+        (
+            network_api.show_interface_mlo_config,
+            network_api._read_interface_mlo_config,
+            {"iface": "wlan0"},
+        ),
     ],
 )
 async def test_network_handler_offloads_sync_worker(

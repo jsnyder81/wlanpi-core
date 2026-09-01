@@ -10,6 +10,10 @@ from wlanpi_core.wpa.config import (
     generate_network_block,
     write_wpa_config,
 )
+from wlanpi_core.wpa.mlo_config import (
+    get_mlo_effective_config,
+    parse_mlo_conf,
+)
 from wlanpi_core.wpa.supplicant import (
     kill_all_supplicants,
     parse_wpa_log,
@@ -38,6 +42,9 @@ __all__ = [
     # Status
     "get_wpa_status",
     "parse_key_mgmt",
+    # MLO config readback
+    "get_mlo_effective_config",
+    "parse_mlo_conf",
     # Scan
     "fetch_scan_results",
     "find_bss",

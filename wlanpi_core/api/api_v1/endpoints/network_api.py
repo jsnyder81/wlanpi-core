@@ -5,13 +5,14 @@ from typing import Optional, Union
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import JSONResponse
 
+from wlanpi_core import network as network_primitives
 from wlanpi_core.adapters.discovery import list_interfaces
 from wlanpi_core.api.openapi_docs import RESPONSES_SCAN
-
 from wlanpi_core.core.auth import verify_auth_wrapper
 from wlanpi_core.core.config import settings
 from wlanpi_core.models.network.vlan.vlan_errors import VLANError
 from wlanpi_core.models.validation_error import ValidationError
+from wlanpi_core.network.lookup import resolve_interface_namespace
 from wlanpi_core.schemas import network
 from wlanpi_core.schemas.common.errors import (
     ApiErrorResponse,
@@ -19,16 +20,12 @@ from wlanpi_core.schemas.common.errors import (
 )
 from wlanpi_core.schemas.network.config import NetworkConfigResponse
 from wlanpi_core.schemas.network.network import IPInterface, IPInterfaceAddress
-from wlanpi_core import network as network_primitives
-from wlanpi_core.network.lookup import resolve_interface_namespace
-from wlanpi_core.services import (
-    network_ethernet_service,
-    network_namespace_service,
-)
-from wlanpi_core.wlan.scan import NoScanAdapterError, wlan_scan
-from wlanpi_core.wpa.status import get_wpa_status
-from wlanpi_core.wpa.scan import ScanInProgressError
+from wlanpi_core.services import network_ethernet_service, network_namespace_service
 from wlanpi_core.utils.validation import validate_vlan_id
+from wlanpi_core.wlan.scan import NoScanAdapterError, wlan_scan
+from wlanpi_core.wpa import mlo_config
+from wlanpi_core.wpa.scan import ScanInProgressError
+from wlanpi_core.wpa.status import get_wpa_status
 
 router = APIRouter()
 legacy_wlan_router = APIRouter()
@@ -42,6 +39,18 @@ def _read_interface_link_stats(iface: str):
     """Resolve interface ownership and read link stats in one worker thread."""
     namespace = resolve_interface_namespace(iface)
     return network_primitives.get_link_stats(iface, namespace=namespace)
+
+
+def _read_interface_mlo_links(iface: str):
+    """Resolve interface ownership and read MLO per-link stats in one worker thread."""
+    namespace = resolve_interface_namespace(iface)
+    return network_primitives.get_mlo_links(iface, namespace=namespace)
+
+
+def _read_interface_mlo_config(iface: str):
+    """Resolve interface ownership and read the effective MLO conf in one worker thread."""
+    namespace = resolve_interface_namespace(iface)
+    return mlo_config.get_mlo_effective_config(iface, namespace=namespace)
 
 
 ################################
@@ -158,11 +167,11 @@ async def show_all_ethernet_vlans(
             return Response(content=str(ex), status_code=400)
 
         def filterfunc(i):
-            return i.model_dump().get("linkinfo", {}).get(
-                "info_kind"
-            ) == "vlan" and i.model_dump().get("linkinfo", {}).get("info_data", {}).get(
-                "id"
-            ) == requested_vlan_id
+            return (
+                i.model_dump().get("linkinfo", {}).get("info_kind") == "vlan"
+                and i.model_dump().get("linkinfo", {}).get("info_data", {}).get("id")
+                == requested_vlan_id
+            )
 
         custom_filter = filterfunc
     try:
@@ -257,6 +266,7 @@ async def delete_ethernet_vlan(
         log.error(ex)
         return Response(content="Internal Server Error", status_code=500)
 
+
 ################################
 # Network primitives (P0)      #
 ################################
@@ -349,6 +359,64 @@ async def show_interface_link_stats(iface: str):
     except Exception as ex:
         log.error(ex)
         return Response(content="Unable to read link statistics", status_code=503)
+
+
+@router.get(
+    "/interfaces/{iface}/mlo-links",
+    response_model=network.MloLinkStats,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_interface_mlo_links(iface: str):
+    """
+    Per-link Wi-Fi 7 MLO statistics for a station-mode interface.
+
+    Combines the link inventory from `iw dev {iface} link` (link IDs, AP link
+    BSSIDs, frequencies) with mac80211 debugfs `link-N/rx_fragments` counters.
+    Counters are raw and monotonic — call twice around a transfer and take
+    deltas to compute per-link RX share; equal nonzero shares alongside a
+    multi-link association is the STR-aggregation signature. A second
+    link listed with zero RX deltas is an associated-but-not-engaging link.
+    When the kernel lacks `CONFIG_MAC80211_DEBUGFS` the response keeps
+    `mac80211_debugfs: false` with a reason, and per-link counters stay null.
+    There is no per-link TX counter in mac80211; uplink share requires a
+    sniffer capture (see the capture tools).
+    """
+    try:
+        return await asyncio.to_thread(_read_interface_mlo_links, iface=iface)
+    except ValidationError as ex:
+        return Response(content=ex.error_msg, status_code=ex.status_code)
+    except ValueError as ex:
+        return Response(content=str(ex), status_code=400)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to read MLO link statistics", status_code=503)
+
+
+@router.get(
+    "/interfaces/{iface}/mlo-config",
+    response_model=network.MloEffectiveConfig,
+    dependencies=[Depends(verify_auth_wrapper)],
+)
+async def show_interface_mlo_config(iface: str):
+    """
+    Effective MLO link options from the interface's supplicant conf file.
+
+    Readback of what profile activation actually wrote: per-network
+    `freq_list` / `mlo=1` and the global `mld_force_single_link`,
+    `mld_connect_band_pref`, `mld_connect_bssid_pref` fields. Verify this
+    matches the requested link set before trusting any measurement — a
+    stale conf produces a single-link association easily mistaken for a
+    two-link association that failed to aggregate.
+    """
+    try:
+        return await asyncio.to_thread(_read_interface_mlo_config, iface=iface)
+    except ValidationError as ex:
+        return Response(content=ex.error_msg, status_code=ex.status_code)
+    except ValueError as ex:
+        return Response(content=str(ex), status_code=400)
+    except Exception as ex:
+        log.error(ex)
+        return Response(content="Unable to read MLO link config", status_code=503)
 
 
 @router.post(
